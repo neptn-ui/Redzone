@@ -1,0 +1,118 @@
+
+# ============================================================
+# SIH26191 — Risk-Aware Relocation Platform
+# docker-compose.yml  (§15.2 of build spec)
+#
+# Three services:
+#   db       — PostGIS 15-3.4 (persistent named volume, healthcheck)
+#   backend  — FastAPI / Uvicorn 8000 (dev reload, depends on db healthy)
+#   frontend — Vite dev server 5173 (depends on backend)
+#
+# Startup: ./run.sh  OR  docker compose up
+# All secrets come from .env (never committed). See .env.example.
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # db — PostGIS 15-3.4
+  # ----------------------------------------------------------
+  db:
+    image: postgis/postgis:15-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready exits 0 only when the server is accepting connections.
+      # backend will not start until this passes (depends_on: condition: service_healthy).
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -q"
+        ]
+      interval:     10s
+      timeout:      5s
+      retries:      10
+      start_period: 30s
+
+  # ----------------------------------------------------------
+  # backend — FastAPI + Uvicorn (Python 3.11)
+  # ----------------------------------------------------------
+  backend:
+    build:
+      context:    ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Connection string uses service name "db" (Docker internal DNS)
+      DATABASE_URL:            postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      POSTGRES_USER:           ${POSTGRES_USER}
+      POSTGRES_PASSWORD:       ${POSTGRES_PASSWORD}
+      POSTGRES_DB:             ${POSTGRES_DB}
+      OPENWEATHER_API_KEY:     ${OPENWEATHER_API_KEY}
+      ANTHROPIC_API_KEY:       ${ANTHROPIC_API_KEY}
+      SENTINELHUB_CLIENT_ID:   ${SENTINELHUB_CLIENT_ID}
+      SENTINELHUB_CLIENT_SECRET: ${SENTINELHUB_CLIENT_SECRET}
+      # Cache policy: "fresh_hours" before a cached API response is considered stale
+      CACHE_FRESH_HOURS:       12
+      PILOT_LAT:               ${PILOT_LAT:-26.96}
+      PILOT_LON:               ${PILOT_LON:-94.22}
+      PILOT_DISTRICT:          ${PILOT_DISTRICT:-"Majuli, Dhemaji, Cachar"}
+      PILOT_STATE:             ${PILOT_STATE:-"Assam"}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source so --reload picks up changes without rebuild
+      - ./backend:/app
+      # Mount data dir so cache files written inside container persist on host
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    # Dev command: hot-reload enabled.
+    # Production: remove --reload and set workers > 1.
+    command: >
+      uvicorn main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --reload-dir /app
+
+  # ----------------------------------------------------------
+  # frontend — React + Vite dev server (Node 20)
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context:    ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: "http://backend:8000"
+      # Vite exposes this to the browser at build time via import.meta.env
+      # In dev, requests to /api/* are proxied to backend:8000 via vite.config.js
+      VITE_API_BASE_URL: ""   # empty = use Vite proxy (see frontend/vite.config.js)
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      # Prevent host node_modules from shadowing the container's
+      - /app/node_modules
+    depends_on:
+      - backend
+    # --host 0.0.0.0 required for Vite to be reachable outside the container
+    command: npm run dev -- --host 0.0.0.0
+
+# ----------------------------------------------------------
+# Named volumes
+# ----------------------------------------------------------
+volumes:
+  pgdata:
+    # persists across `docker compose down` — use `docker compose down -v`
+    # only if you want to wipe the database
+    name: redzone_pgdata

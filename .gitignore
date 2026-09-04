@@ -1,0 +1,106 @@
+# SIH26191 — Risk-Aware Relocation Platform
+# .gitignore
+
+# ============================================================
+# SECRETS — never commit (§15.1)
+# ============================================================
+.env
+*.env.local
+*.env.production
+
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.whl
+.Python
+.venv/
+venv/
+backend/fastapi/
+backend/pydantic/
+backend/sqlalchemy/
+backend/httpx/
+backend/apscheduler/
+backend/geoalchemy2/
+backend/pulp/
+backend/pytest/
+backend/starlette/
+backend/shapely/
+backend/_pytest/
+env/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.so
+*.dylib
+# Coverage
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# ============================================================
+# Node / Frontend
+# ============================================================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# ============================================================
+# Docker
+# ============================================================
+# Named volume data is managed by Docker; no path to gitignore
+# But local override compose files can be local-only:
+docker-compose.override.yml
+
+# ============================================================
+# Data / Cache (large files — tracked separately if needed)
+# ============================================================
+data/cache/
+# Pilot district data IS committed (it's the source-of-truth dataset)
+# so data/pilot_district/ is NOT ignored
+
+# ============================================================
+# OS / Editor
+# ============================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/settings.json
+*.code-workspace
+
+# ============================================================
+# Logs
+# ============================================================
+*.log
+logs/
+
+# ============================================================
+# ML model artifacts (large; add to Git LFS if needed)
+# ============================================================
+backend/ai/models/
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.onnx
