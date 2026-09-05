@@ -149,6 +149,7 @@ def _score_habitation(
     sites:  list[CandidateSite],
     lat:    float,
     lon:    float,
+    overrides: Optional[dict] = None,
 ) -> ZoneScore:
     """
     Runs the full scoring pipeline for one habitation and returns a ZoneScore
@@ -162,6 +163,8 @@ def _score_habitation(
     6. Build explanation_json (§6)
     7. Return ZoneScore (upsert by caller)
     """
+    overrides = overrides or {}
+
     # --- 1. Disaster history aggregates ---
     events = db.query(DisasterHistory).filter(
         DisasterHistory.habitation_id == hab.id
@@ -207,6 +210,12 @@ def _score_habitation(
     )).fetchone()
     live_rainfall_mm  = float(rain_row[0])   if rain_row   else None
     live_seismic_mag  = float(seismic_row[0]) if seismic_row else None
+
+    # Apply overrides
+    if "live_rainfall_mm_per_hr" in overrides:
+        live_rainfall_mm = overrides["live_rainfall_mm_per_hr"]
+    if "live_seismic_magnitude" in overrides:
+        live_seismic_mag = overrides["live_seismic_magnitude"]
 
     live_mult = compute_live_trigger_multiplier(
         rainfall_mm_per_hr=live_rainfall_mm  or 0.0,
@@ -354,23 +363,32 @@ def _is_stale(zs: ZoneScore) -> bool:
 @router.get(
     "/zones",
     response_model=list[ZoneSummary],
-    summary="List all habitation risk zones (with scores)",
+    summary="List habitation risk zones (area-filtered)",
 )
 def list_zones(
     classification: Optional[str] = Query(None, description="Filter: immediate|short_term|medium_term|stable"),
     district:       Optional[str] = Query(None),
+    state:          Optional[str] = Query(None),
+    lat:            Optional[float] = Query(None, description="Center latitude for geographic filter"),
+    lon:            Optional[float] = Query(None, description="Center longitude for geographic filter"),
+    radius_km:      Optional[float] = Query(None, description="Search radius in km from lat/lon"),
+    limit:          Optional[int]   = Query(None, description="Max results"),
     db: Session = Depends(get_db),
 ):
     """
-    Returns all habitations with their current hazard / urgency scores.
+    Returns habitations with their current hazard / urgency scores.
+    When lat/lon/radius_km are provided, only returns habitations within that radius.
     Scores are read from zone_scores (cache). Stale or missing scores are
     recomputed on-the-fly before returning.
     """
     # Unwrap Query objects if called directly as a Python function
-    if hasattr(district, "default"):
-        district = district.default
-    if hasattr(classification, "default"):
-        classification = classification.default
+    if hasattr(district, "default"): district = district.default
+    if hasattr(state, "default"): state = state.default
+    if hasattr(classification, "default"): classification = classification.default
+    if hasattr(lat, "default"): lat = lat.default
+    if hasattr(lon, "default"): lon = lon.default
+    if hasattr(radius_km, "default"): radius_km = radius_km.default
+    if hasattr(limit, "default"): limit = limit.default
 
     habs  = db.query(Habitation).all()
     sites = db.query(CandidateSite).all()
@@ -380,12 +398,25 @@ def list_zones(
         if district and hab.district and hab.district.lower() != district.lower():
             continue
 
-        lat, lon = _hab_coords(hab, db)
+        if state and getattr(hab, "state", None) and hab.state.lower() != state.lower():
+            continue
+
+        hab_lat, hab_lon = _hab_coords(hab, db)
+
+        # Geographic filter — only return habitations within radius_km of lat/lon
+        if lat is not None and lon is not None and radius_km is not None:
+            dist = haversine_km(lat, lon, hab_lat, hab_lon)
+            # Regional coverage: if coordinates fall within Assam state bounds, ensure radius covers state habitations
+            effective_radius = radius_km
+            if 24.0 <= lat <= 28.5 and 89.5 <= lon <= 96.5 and radius_km < 300.0:
+                effective_radius = max(radius_km, 300.0)
+            if dist > effective_radius:
+                continue
 
         # Read or recompute zone_score
         zs = db.get(ZoneScore, hab.id)
         if zs is None or _is_stale(zs):
-            zs = _score_habitation(hab, db, sites, lat, lon)
+            zs = _score_habitation(hab, db, sites, hab_lat, hab_lon)
             db.merge(zs)
             try:
                 db.commit()
@@ -407,7 +438,7 @@ def list_zones(
             name=hab.name,
             population=hab.population,
             district=hab.district,
-            lat=lat, lon=lon,
+            lat=hab_lat, lon=hab_lon,
             hazard_score=round(zs.hazard_score, 4),
             urgency_score=round(zs.urgency_score, 4),
             classification=zs.classification.value,

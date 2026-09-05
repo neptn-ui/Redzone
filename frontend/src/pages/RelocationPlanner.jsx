@@ -1,291 +1,539 @@
-import { useState } from 'react'
+// src/pages/RelocationPlanner.jsx
+// ============================================================================
+// REDZONE — Relocation Planner
+// "What is the operational plan? Who decides?"
+//
+// 7-step map-visible workflow:
+//   01 Select Origins → 02 Assess Impact → 03 Select Site → 04 Route
+//   → 05 Resources → 06 Review → 07 Approve / Override
+//
+// Human-in-the-loop: REDZONE recommends, operator decides.
+// Planning assumptions labeled. No invented resources.
+// ============================================================================
+
+import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircleIcon, ShieldAlertIcon, RefreshIcon, UsersIcon, LocationIcon } from '../components/Icons'
+import { useAppStore } from '../context/AppStore'
+import { api } from '../api/client'
+import { getRoute } from '../api/geo'
+import HazardMap from '../components/HazardMap'
+
+// ── Step definitions ──────────────────────────────────────────────────────────
 
 const STEPS = [
-  { id: 1, title: 'Select Habitations', desc: 'Identify vulnerable zones for evacuation.' },
-  { id: 2, title: 'Select Safe Site', desc: 'Assign destination high-ground parcel.' },
-  { id: 3, title: 'Allocate Resources', desc: 'Deploy NDRF, transport, and medical.' },
-  { id: 4, title: 'Generate Plan', desc: 'Review manifest and issue orders.' },
+  { id: 1, label: '01  Origins',   desc: 'Select habitation zones to relocate' },
+  { id: 2, label: '02  Impact',    desc: 'Review exposure and population' },
+  { id: 3, label: '03  Safe Site', desc: 'Select relocation destination' },
+  { id: 4, label: '04  Route',     desc: 'Compute road route' },
+  { id: 5, label: '05  Resources', desc: 'Estimate required resources' },
+  { id: 6, label: '06  Review',    desc: 'Final plan review' },
+  { id: 7, label: '07  Approve',   desc: 'Human decision' },
 ]
 
-export default function RelocationPlanner() {
-  const [activeStep, setActiveStep] = useState(1)
-  const [habitations, setHabitations] = useState(['betkuchandi'])
-  const [site, setSite] = useState('b17')
-  const [resources, setResources] = useState({ ndrf: 2, buses: 5, medical: 50 })
-  const [deployed, setDeployed] = useState(false)
+// ── Resource estimation (planning assumptions — not validated data) ────────────
 
-  const toggleHabitation = (id) => {
-    setHabitations(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+function estimateResources(population, distanceKm) {
+  if (!population) return null
+  // PLANNING ASSUMPTIONS — not validated conversion factors
+  const buses       = Math.ceil(population / 45)
+  const ambulances  = Math.ceil(population / 500)
+  const trucks      = Math.ceil(population / 100)
+  const medTeams    = Math.max(1, Math.ceil(population / 1000))
+  const fieldTeams  = Math.max(2, Math.ceil(population / 500))
+  const water_L     = population * 3  // 3L/person/day — WHO minimum
+  const food_kits   = Math.ceil(population / 4)  // family of 4
+
+  return {
+    transport: {
+      buses:      { qty: buses,      unit: 'buses',      note: '45 passengers/bus · PLANNING ASSUMPTION' },
+      ambulances: { qty: ambulances, unit: 'ambulances', note: '1 per 500 pop · PLANNING ASSUMPTION' },
+      trucks:     { qty: trucks,     unit: 'trucks',     note: 'Relief goods · PLANNING ASSUMPTION' },
+    },
+    personnel: {
+      medical:    { qty: medTeams,  unit: 'teams', note: '1 per 1000 pop · PLANNING ASSUMPTION' },
+      field:      { qty: fieldTeams,unit: 'teams', note: '1 per 500 pop · PLANNING ASSUMPTION' },
+    },
+    supplies: {
+      water:      { qty: water_L,   unit: 'litres/day',  note: 'WHO minimum 3L/person/day · PLANNING ASSUMPTION' },
+      food_kits:  { qty: food_kits, unit: 'kits',        note: '1 kit per 4 persons/day · PLANNING ASSUMPTION' },
+    },
   }
+}
 
-  const handleDeploy = () => {
-    setDeployed(true)
-    setTimeout(() => {
-      alert('Deployment Manifest sent to field teams successfully!')
-    }, 500)
-  }
+// ── Resource row ──────────────────────────────────────────────────────────────
 
+function ResourceRow({ label, qty, unit, note }) {
   return (
-    <div className="flex w-full h-full flex-1 min-h-0 bg-[#090d16]">
-      {/* Left Vertical Wizard */}
-      <aside className="w-[420px] shrink-0 bg-slate-950/80 border-r border-white/[0.08] backdrop-blur-xl flex flex-col z-10 shadow-[10px_0_30px_rgba(0,0,0,0.5)] h-full overflow-y-auto">
-        <div className="p-6 border-b border-white/[0.08] bg-slate-900/30">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 font-mono">
-            Operational Workflow
-          </div>
-          <h2 className="text-xl font-extrabold text-white tracking-tight uppercase">Relocation Planner</h2>
-        </div>
+    <div className="flex items-start gap-3 py-2 border-b border-white/[0.04] last:border-0">
+      <div className="flex-1">
+        <div className="text-xs font-semibold text-slate-300">{label}</div>
+        <div className="text-[9px] text-amber-400/70 font-mono mt-0.5">{note}</div>
+      </div>
+      <div className="text-right shrink-0">
+        <div className="text-sm font-extrabold font-mono text-white">{qty?.toLocaleString()}</div>
+        <div className="text-[9px] text-slate-600 font-mono">{unit}</div>
+      </div>
+    </div>
+  )
+}
 
-        <div className="p-6 space-y-8">
-          {STEPS.map(step => (
-            <div key={step.id} className="relative">
-              {/* Connector Line */}
-              {step.id !== STEPS.length && (
-                <div className={`absolute left-4 top-10 w-0.5 h-16 ${
-                  activeStep > step.id ? 'bg-blue-500' : 'bg-white/[0.05]'
-                }`} />
-              )}
-              
-              <div className="flex items-start gap-4">
-                <button 
-                  onClick={() => setActiveStep(step.id)}
-                  className={`relative z-10 flex items-center justify-center w-8 h-8 rounded-full font-bold text-xs font-mono transition-all ${
-                    activeStep === step.id 
-                      ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]'
-                      : activeStep > step.id
-                        ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                        : 'bg-white/[0.03] text-slate-500 border border-white/[0.06]'
-                  }`}
-                >
-                  {activeStep > step.id ? <CheckCircleIcon size={14} /> : step.id}
-                </button>
-                <div className="pt-1.5 flex-1 cursor-pointer" onClick={() => setActiveStep(step.id)}>
-                  <div className={`text-sm font-bold tracking-tight uppercase ${
-                    activeStep === step.id ? 'text-white' : 'text-slate-400'
-                  }`}>
-                    {step.title}
-                  </div>
-                  <div className="text-[10px] text-slate-500 font-medium mt-1">{step.desc}</div>
-                  
-                  {/* Step 1 Content */}
-                  <AnimatePresence>
-                    {activeStep === 1 && step.id === 1 && (
-                      <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="mt-4 space-y-2 overflow-hidden">
-                        {[
-                          { id: 'betkuchandi', name: 'Betkuchandi Dyke Colony', pop: 5800 },
-                          { id: 'bhuragaon', name: 'Bhuragaon Lowlands', pop: 3200 },
-                          { id: 'majuli_south', name: 'Majuli South Bank', pop: 11500 }
-                        ].map(hab => (
-                          <label key={hab.id} className={`flex items-center justify-between p-3 rounded-lg border transition-all cursor-pointer ${
-                            habitations.includes(hab.id) ? 'bg-blue-600/10 border-blue-500/30' : 'bg-white/[0.02] border-white/[0.04] hover:bg-white/[0.06]'
-                          }`}>
-                            <div className="flex items-center gap-3">
-                              <input 
-                                type="checkbox" 
-                                checked={habitations.includes(hab.id)} 
-                                onChange={() => toggleHabitation(hab.id)}
-                                className="rounded border-white/20 bg-black/20 text-blue-500 focus:ring-0" 
-                              />
-                              <span className="text-xs font-bold text-slate-200">{hab.name}</span>
-                            </div>
-                            <span className="text-[10px] font-mono text-slate-500">{hab.pop} ppl</span>
-                          </label>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
+// ── Zone selector ─────────────────────────────────────────────────────────────
 
-                  {/* Step 2 Content */}
-                  <AnimatePresence>
-                    {activeStep === 2 && step.id === 2 && (
-                      <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="mt-4 space-y-2 overflow-hidden">
-                        {[
-                          { id: 'b17', name: 'B-17 Highland Parcel', cap: 2500, match: 94 },
-                          { id: 'c4', name: 'C-4 Community Hall', cap: 800, match: 82 },
-                        ].map(s => (
-                          <label key={s.id} className={`flex items-center justify-between p-3 rounded-lg border transition-all cursor-pointer ${
-                            site === s.id ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-white/[0.02] border-white/[0.04] hover:bg-white/[0.06]'
-                          }`}>
-                            <div className="flex items-center gap-3">
-                              <input 
-                                type="radio" 
-                                checked={site === s.id} 
-                                onChange={() => setSite(s.id)}
-                                className="rounded-full border-white/20 bg-black/20 text-emerald-500 focus:ring-0" 
-                              />
-                              <div>
-                                <div className="text-xs font-bold text-slate-200">{s.name}</div>
-                                <div className="text-[9px] text-slate-500 mt-0.5 uppercase tracking-wider">{s.cap} capacity</div>
-                              </div>
-                            </div>
-                            <span className="text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">{s.match}% Match</span>
-                          </label>
-                        ))}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  {/* Step 3 Content */}
-                  <AnimatePresence>
-                    {activeStep === 3 && step.id === 3 && (
-                      <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="mt-4 space-y-3 overflow-hidden">
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="p-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-                            <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">NDRF Teams</div>
-                            <input 
-                              type="number" 
-                              value={resources.ndrf} 
-                              onChange={e => setResources({...resources, ndrf: e.target.value})}
-                              className="w-full bg-slate-900 border border-white/10 rounded px-2 py-1 text-sm text-white font-mono outline-none" 
-                            />
-                          </div>
-                          <div className="p-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-                            <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Transport Buses</div>
-                            <input 
-                              type="number" 
-                              value={resources.buses} 
-                              onChange={e => setResources({...resources, buses: e.target.value})}
-                              className="w-full bg-slate-900 border border-white/10 rounded px-2 py-1 text-sm text-white font-mono outline-none" 
-                            />
-                          </div>
-                        </div>
-                        <div className="p-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-                          <div className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-2">Medical Kits & Tents</div>
-                          <input 
-                            type="number" 
-                            value={resources.medical} 
-                            onChange={e => setResources({...resources, medical: e.target.value})}
-                            className="w-full bg-slate-900 border border-white/10 rounded px-2 py-1 text-sm text-white font-mono outline-none" 
-                          />
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  {/* Step 4 Content */}
-                  <AnimatePresence>
-                    {activeStep === 4 && step.id === 4 && (
-                      <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="mt-4 overflow-hidden">
-                        <div className="text-xs text-slate-400 mb-4 leading-relaxed">
-                          All parameters set. Review the Deployment Manifest on the right and issue field orders.
-                        </div>
-                        <button 
-                          onClick={() => setActiveStep(3)}
-                          className="px-4 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-xs font-bold text-slate-300 transition-all uppercase tracking-wider border border-white/10"
-                        >
-                          Back to Edit
-                        </button>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                </div>
+function OriginSelector({ zones, selected, onToggle }) {
+  return (
+    <div className="flex-1 overflow-y-auto min-h-0">
+      <div className="p-3 text-[9px] text-slate-600 font-mono border-b border-white/[0.04]">
+        Select one or more habitation zones to relocate
+      </div>
+      {zones.length === 0 && (
+        <div className="p-4 text-center text-[11px] text-slate-600">No zones in this area</div>
+      )}
+      {zones.map(zone => {
+        const isSelected = selected.some(z => z.habitation_id === zone.habitation_id)
+        return (
+          <button
+            key={zone.habitation_id}
+            onClick={() => onToggle(zone)}
+            className={`w-full text-left flex items-center gap-2 px-3 py-2.5 border-b border-white/[0.04] last:border-0 transition-all ${
+              isSelected ? 'bg-blue-600/10' : 'hover:bg-white/[0.03]'
+            }`}
+          >
+            <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-all ${
+              isSelected ? 'bg-blue-600 border-blue-500' : 'border-white/20 bg-white/[0.03]'
+            }`}>
+              {isSelected && <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-slate-200 truncate">{zone.name}</div>
+              <div className="text-[10px] text-slate-600 font-mono">
+                {(zone.population ?? 0).toLocaleString()} people
               </div>
             </div>
-          ))}
-        </div>
-
-        <div className="mt-auto p-6 border-t border-white/[0.08] bg-slate-900/30">
-          <button 
-            onClick={() => setActiveStep(prev => Math.min(prev + 1, 4))}
-            disabled={activeStep === 4}
-            className="w-full py-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:border-slate-700 text-white text-xs font-bold tracking-widest uppercase transition-all shadow-[0_4px_12px_rgba(37,99,235,0.4),inset_0_1px_0_rgba(255,255,255,0.2)]"
-          >
-            {activeStep === 4 ? 'Ready for Deployment' : 'Continue to Next Step'}
+            <div className={`text-[9px] font-bold font-mono ${
+              zone.classification === 'immediate' ? 'text-red-400' :
+              zone.classification === 'short_term' ? 'text-orange-400' :
+              'text-amber-400'
+            }`}>
+              {zone.classification?.replace(/_/g, ' ').toUpperCase().slice(0, 3) ?? '—'}
+            </div>
           </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+export default function RelocationPlanner() {
+  const navigate = useNavigate()
+  const { area, setOrigin, setSelectedSite, setRoute, setCurrentPlan, setPlanStatus, setDecision } = useAppStore()
+
+  const [step,          setStep]         = useState(1)
+  const [zones,         setZones]        = useState([])
+  const [sites,         setSites]        = useState([])
+  const [selectedZones, setSelectedZones]= useState([])
+  const [selectedSite,  setSelectedSiteL]= useState(null)
+  const [routeResult,   setRouteResult]  = useState(null)
+  const [routeStatus,   setRouteStatus]  = useState('idle')
+  const [resources,     setResources]    = useState(null)
+  const [loading,       setLoading]      = useState(false)
+  const [overrideReason,setOverrideReason]= useState('')
+  const [decision,      setDecisionL]    = useState(null) // 'approved' | 'overridden'
+
+  useEffect(() => {
+    if (!area) return
+    setLoading(true)
+    const params = { lat: area.lat, lon: area.lon, radius_km: 100 }
+    Promise.allSettled([api.zones(params), api.sites(params)]).then(([z, s]) => {
+      if (z.status === 'fulfilled') {
+        const sorted = (z.value ?? []).sort((a, b) => (b.urgency_score ?? 0) - (a.urgency_score ?? 0))
+        setZones(sorted)
+      }
+      if (s.status === 'fulfilled') setSites(s.value ?? [])
+    }).finally(() => setLoading(false))
+  }, [area])
+
+  const totalPop = selectedZones.reduce((s, z) => s + (z.population ?? 0), 0)
+
+  const toggleZone = (zone) => {
+    setSelectedZones(prev =>
+      prev.some(z => z.habitation_id === zone.habitation_id)
+        ? prev.filter(z => z.habitation_id !== zone.habitation_id)
+        : [...prev, zone]
+    )
+  }
+
+  const handleSelectSite = async (site) => {
+    setSelectedSiteL(site)
+    setSelectedSite(site)
+    setRouteStatus('loading')
+    if (selectedZones.length > 0) {
+      const origin = selectedZones[0]  // primary origin
+      setOrigin(origin)
+      try {
+        const result = await getRoute(origin, site)
+        setRouteResult(result)
+        if (result.status === 'ok') {
+          setRoute(result)
+          setRouteStatus('ready')
+        } else {
+          setRouteStatus('unavailable')
+        }
+      } catch {
+        setRouteStatus('unavailable')
+      }
+    } else {
+      setRouteStatus('idle')
+    }
+    // Always advance to step 4 so user sees the result
+    setStep(4)
+  }
+
+  const handleComputeResources = () => {
+    const dist = routeResult?.routes?.[0]?.distanceKm
+    const r = estimateResources(totalPop, dist ? parseFloat(dist) : null)
+    setResources(r)
+    setStep(6)
+  }
+
+  const handleApprove = () => {
+    const plan = {
+      area: area?.name,
+      origins: selectedZones.map(z => z.name),
+      totalPop,
+      destination: selectedSite?.name,
+      route: routeResult?.routes?.[0],
+      resources,
+      status: 'approved',
+      timestamp: new Date().toISOString(),
+      decisionBy: 'operator',
+      overrideReason: null,
+    }
+    setCurrentPlan(plan)
+    setPlanStatus('approved')
+    setDecision({ recommendation: 'Relocation approved by operator', action: 'approve', timestamp: plan.timestamp })
+    setDecisionL('approved')
+    setStep(7)
+  }
+
+  const handleOverride = () => {
+    if (!overrideReason.trim()) return
+    const plan = {
+      area: area?.name,
+      origins: selectedZones.map(z => z.name),
+      totalPop,
+      destination: selectedSite?.name,
+      route: routeResult?.routes?.[0],
+      resources,
+      status: 'overridden',
+      timestamp: new Date().toISOString(),
+      decisionBy: 'operator',
+      overrideReason,
+    }
+    setCurrentPlan(plan)
+    setPlanStatus('overridden')
+    setDecision({ recommendation: 'Override recorded', action: 'override', overrideReason, timestamp: plan.timestamp })
+    setDecisionL('overridden')
+    setStep(7)
+  }
+
+  // Map zones to show
+  const mapZones = step >= 1 ? zones : []
+  const mapRoute = step >= 4 && routeResult?.routes?.[0] ? routeResult.routes[0] : null
+
+  return (
+    <div className="flex flex-1 h-full min-h-0 overflow-hidden">
+
+      {/* ── Left panel ── */}
+      <div className="w-72 shrink-0 flex flex-col border-r border-white/[0.06] bg-[#0b0f1a]/95 overflow-hidden">
+
+        {/* Step nav */}
+        <div className="border-b border-white/[0.06] shrink-0">
+          <div className="px-3 py-2 text-[9px] font-bold uppercase tracking-widest text-slate-500 font-mono">RELOCATION PLANNER</div>
+          <div className="px-2 pb-2 space-y-0.5">
+            {STEPS.map(s => (
+              <div
+                key={s.id}
+                onClick={() => s.id < step && setStep(s.id)}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded transition-all ${
+                  s.id === step
+                    ? 'bg-blue-600/10 border border-blue-500/20'
+                    : s.id < step
+                    ? 'text-slate-600 cursor-pointer hover:bg-white/[0.03]'
+                    : 'text-slate-700 opacity-50'
+                }`}
+              >
+                <div className={`w-4 h-4 rounded-full border flex items-center justify-center text-[8px] font-bold shrink-0 ${
+                  s.id < step
+                    ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-400'
+                    : s.id === step
+                    ? 'bg-blue-600/20 border-blue-500/40 text-blue-400'
+                    : 'border-white/[0.10] text-slate-700'
+                }`}>
+                  {s.id < step ? '✓' : s.id}
+                </div>
+                <span className={`text-[10px] font-semibold ${s.id === step ? 'text-slate-200' : ''}`}>{s.label}</span>
+              </div>
+            ))}
+          </div>
         </div>
-      </aside>
 
-      {/* Right Canvas: Deployment Manifest */}
-      <main className="flex-1 p-10 flex justify-center items-start overflow-y-auto relative">
-        {/* Background Grid Pattern */}
-        <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
+        {/* Step content */}
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          {!area ? (
+            <div className="p-4 text-center text-[11px] text-slate-600 italic">Search for an area to begin</div>
+          ) : loading ? (
+            <div className="p-4 space-y-2">{[1,2,3].map(i => <div key={i} className="h-10 rounded shimmer bg-white/[0.04]" />)}</div>
+          ) : (
 
-        <AnimatePresence>
-          {activeStep === 4 && (
-            <motion.div 
-              initial={{ y: 40, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              className="w-full max-w-2xl bg-slate-950/95 border border-white/[0.08] backdrop-blur-xl rounded-2xl shadow-[0_30px_60px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.05)] overflow-hidden relative z-10 mt-10"
-            >
-              <div className="p-8 border-b border-white/[0.06] bg-[url('/noise.png')]">
-                <div className="flex justify-between items-start mb-6">
-                  <div>
-                    <h1 className="text-2xl font-extrabold text-white tracking-tight uppercase mb-2">Deployment Manifest</h1>
-                    <div className="text-sm font-mono text-slate-400">ORDER REF: AS-2026-F91A</div>
+            <AnimatePresence mode="wait">
+              <motion.div key={step} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="flex flex-col flex-1 min-h-0 overflow-hidden">
+
+                {/* Step 1: Origins */}
+                {step === 1 && (
+                  <>
+                    <OriginSelector zones={zones} selected={selectedZones} onToggle={toggleZone} />
+                    <div className="p-3 border-t border-white/[0.06] shrink-0">
+                      <div className="text-[10px] text-slate-600 font-mono mb-2">
+                        {selectedZones.length} zones · {totalPop.toLocaleString()} people
+                      </div>
+                      <button
+                        disabled={selectedZones.length === 0}
+                        onClick={() => setStep(2)}
+                        className="w-full py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-bold uppercase tracking-wider border border-blue-500/30 transition-all disabled:opacity-30"
+                      >
+                        Next: Assess Impact →
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* Step 2: Impact */}
+                {step === 2 && (
+                  <div className="flex-1 overflow-y-auto p-4">
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-slate-600 font-mono mb-3">SELECTED ORIGINS</div>
+                    {selectedZones.map(z => (
+                      <div key={z.habitation_id} className="flex justify-between py-2 border-b border-white/[0.04]">
+                        <span className="text-xs text-slate-300">{z.name}</span>
+                        <span className="text-xs font-mono text-slate-400">{(z.population ?? 0).toLocaleString()}</span>
+                      </div>
+                    ))}
+                    <div className="flex justify-between py-2 border-t border-white/[0.10] mt-1">
+                      <span className="text-xs font-bold text-slate-200">TOTAL</span>
+                      <span className="text-sm font-extrabold font-mono text-white">{totalPop.toLocaleString()}</span>
+                    </div>
+                    <div className="mt-4 p-2 rounded-lg border border-blue-500/20 bg-blue-500/5 text-[10px] text-blue-400 font-mono">
+                      DATA STATUS: STATIC — Population from habitation records, not a live census
+                    </div>
+                    <button onClick={() => setStep(3)} className="w-full mt-4 py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-bold uppercase tracking-wider border border-blue-500/30 transition-all">
+                      Select Safe Site →
+                    </button>
                   </div>
-                  <div className="w-16 h-16 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-                    <ShieldAlertIcon size={32} />
-                  </div>
-                </div>
+                )}
 
-                <div className="grid grid-cols-2 gap-6 mt-8">
-                  <div>
-                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">Target Habitations</div>
-                    <div className="space-y-1 text-sm font-semibold text-slate-200">
-                      {habitations.includes('betkuchandi') && <div>Betkuchandi Dyke Colony</div>}
-                      {habitations.includes('bhuragaon') && <div>Bhuragaon Lowlands</div>}
-                      {habitations.includes('majuli_south') && <div>Majuli South Bank</div>}
+                {/* Step 3: Site */}
+                {step === 3 && (
+                  <>
+                    <div className="flex-1 overflow-y-auto min-h-0">
+                      {sites.length === 0 && <div className="p-4 text-center text-[11px] text-slate-600">No sites in area</div>}
+                      {sites.map(site => (
+                        <div
+                          key={site.site_id}
+                          onClick={() => handleSelectSite(site)}
+                          className={`flex items-center gap-2 px-3 py-2.5 border-b border-white/[0.04] cursor-pointer transition-all ${
+                            selectedSite?.site_id === site.site_id ? 'bg-blue-600/10' : 'hover:bg-white/[0.03]'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-semibold text-slate-200 truncate">{site.name}</div>
+                            <div className="text-[10px] text-slate-600 font-mono">Cap: {site.available_capacity?.toLocaleString() ?? '—'}</div>
+                          </div>
+                          <div className="text-sm font-extrabold font-mono text-blue-400">
+                            {site.capacity_score != null ? `${Math.round(site.capacity_score * 100)}%` : '—'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {selectedSite && (
+                      <div className="p-3 border-t border-white/[0.06] shrink-0">
+                        <div className="text-[10px] text-slate-400 font-mono mb-2">Selected: <span className="text-slate-200 font-bold">{selectedSite.name}</span></div>
+                        <button onClick={() => setStep(4)} className="w-full py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-bold uppercase tracking-wider border border-blue-500/30 transition-all">
+                          Compute Route →
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Step 4: Route */}
+                {step === 4 && (
+                  <div className="flex-1 p-4 overflow-y-auto">
+                    {routeStatus === 'loading' && (
+                      <div className="text-center py-4">
+                        <div className="w-4 h-4 border-2 border-blue-500/30 border-t-blue-400 rounded-full animate-spin mx-auto mb-2" />
+                        <div className="text-[11px] text-slate-500">Computing road route via OSRM...</div>
+                      </div>
+                    )}
+                    {routeStatus === 'unavailable' && (
+                      <div className="p-3 rounded-lg border border-amber-500/20 bg-amber-500/5 text-[11px] text-amber-400">
+                        <div className="font-bold mb-1">ROUTING UNAVAILABLE</div>
+                        OSRM could not find a road route. No straight-line alternative is shown.
+                      </div>
+                    )}
+                    {routeResult?.routes?.[0] && (
+                      <div className="space-y-2 mb-4">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="p-2 rounded-lg bg-white/[0.02] border border-white/[0.04] text-center">
+                            <div className="text-[9px] text-slate-600 font-mono uppercase tracking-wider">Distance</div>
+                            <div className="text-lg font-extrabold font-mono text-white">{routeResult.routes[0].distanceKm} km</div>
+                          </div>
+                          <div className="p-2 rounded-lg bg-white/[0.02] border border-white/[0.04] text-center">
+                            <div className="text-[9px] text-slate-600 font-mono uppercase tracking-wider">ETA</div>
+                            <div className="text-lg font-extrabold font-mono text-white">{routeResult.routes[0].durationFormatted}</div>
+                          </div>
+                        </div>
+                        <div className="text-[9px] text-slate-700 font-mono">OSRM road network routing · Hazard assessment not applied</div>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => { setStep(5); handleComputeResources() }}
+                      className="w-full py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-bold uppercase tracking-wider border border-blue-500/30 transition-all"
+                    >
+                      Estimate Resources →
+                    </button>
+                  </div>
+                )}
+
+                {/* Step 5: Resources */}
+                {step === 5 && resources && (
+                  <div className="flex-1 p-4 overflow-y-auto">
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-slate-600 font-mono mb-1">RESOURCE ESTIMATE</div>
+                    <div className="text-[9px] text-amber-400/70 font-mono mb-3">PLANNING ASSUMPTIONS — Not validated operational data</div>
+                    {Object.entries(resources).map(([cat, items]) => (
+                      <div key={cat} className="mb-4">
+                        <div className="text-[9px] font-bold uppercase tracking-widest text-slate-700 font-mono mb-1">{cat.toUpperCase()}</div>
+                        {Object.entries(items).map(([k, v]) => (
+                          <ResourceRow key={k} label={k.replace(/_/g, ' ').toUpperCase()} qty={v.qty} unit={v.unit} note={v.note} />
+                        ))}
+                      </div>
+                    ))}
+                    <button onClick={() => setStep(6)} className="w-full mt-2 py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-bold uppercase tracking-wider border border-blue-500/30 transition-all">
+                      Review Plan →
+                    </button>
+                  </div>
+                )}
+
+                {/* Step 6: Review */}
+                {step === 6 && (
+                  <div className="flex-1 p-4 overflow-y-auto">
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-slate-600 font-mono mb-3">PLAN REVIEW</div>
+                    <div className="space-y-2 mb-4">
+                      <div className="flex justify-between text-[11px] py-1.5 border-b border-white/[0.04]">
+                        <span className="text-slate-500">Area</span>
+                        <span className="text-slate-200 font-mono">{area?.name}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] py-1.5 border-b border-white/[0.04]">
+                        <span className="text-slate-500">Origins</span>
+                        <span className="text-slate-200 font-mono">{selectedZones.length} zones</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] py-1.5 border-b border-white/[0.04]">
+                        <span className="text-slate-500">Population</span>
+                        <span className="text-slate-200 font-mono">{totalPop.toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] py-1.5 border-b border-white/[0.04]">
+                        <span className="text-slate-500">Destination</span>
+                        <span className="text-slate-200 font-mono text-right max-w-32 truncate">{selectedSite?.name ?? '—'}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] py-1.5">
+                        <span className="text-slate-500">Route</span>
+                        <span className="text-slate-200 font-mono">
+                          {routeResult?.routes?.[0]
+                            ? `${routeResult.routes[0].distanceKm}km · ${routeResult.routes[0].durationFormatted}`
+                            : 'UNAVAILABLE'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-lg border border-blue-500/20 bg-blue-500/5 mb-4 text-[10px] text-blue-300/80 leading-relaxed">
+                      <span className="font-bold text-blue-400">REDZONE RECOMMENDATION:</span>{' '}
+                      Proceed with relocation of {totalPop.toLocaleString()} persons from {selectedZones.length} zone(s) to {selectedSite?.name ?? 'selected site'}. This is a system recommendation — human operator approval required.
+                    </div>
+
+                    <div className="space-y-2">
+                      <button onClick={handleApprove} className="w-full py-2.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 text-xs font-bold uppercase tracking-wider border border-emerald-500/30 transition-all">
+                        Approve &amp; Deploy
+                      </button>
+                      <div className="text-[9px] text-slate-600 font-mono">— or —</div>
+                      <textarea
+                        value={overrideReason}
+                        onChange={e => setOverrideReason(e.target.value)}
+                        placeholder="Override reason (required)..."
+                        rows={2}
+                        className="w-full bg-white/[0.03] border border-white/[0.08] rounded-lg px-3 py-2 text-[11px] text-slate-300 placeholder-slate-700 outline-none resize-none"
+                      />
+                      <button
+                        onClick={handleOverride}
+                        disabled={!overrideReason.trim()}
+                        className="w-full py-2 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-bold uppercase tracking-wider border border-amber-500/20 transition-all disabled:opacity-30"
+                      >
+                        Override with Reason
+                      </button>
                     </div>
                   </div>
-                  <div>
-                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-2">Destination</div>
-                    <div className="text-sm font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-2 rounded-lg inline-block">
-                      {site === 'b17' ? 'B-17 Highland Parcel' : 'C-4 Community Hall'}
+                )}
+
+                {/* Step 7: Decision */}
+                {step === 7 && (
+                  <div className="flex-1 p-4 flex flex-col gap-4">
+                    <div className={`p-4 rounded-xl border text-center ${
+                      decision === 'approved'
+                        ? 'bg-emerald-500/10 border-emerald-500/30'
+                        : 'bg-amber-500/10 border-amber-500/30'
+                    }`}>
+                      <div className={`text-sm font-extrabold mb-1 ${decision === 'approved' ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {decision === 'approved' ? 'APPROVED' : 'OVERRIDE RECORDED'}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        {new Date().toLocaleString('en-IN')} · Operator decision
+                      </div>
                     </div>
+                    <div className="text-[9px] text-slate-600 font-mono text-center leading-relaxed">
+                      Decision logged in audit trail. See Reports page for full record.
+                    </div>
+                    <button onClick={() => navigate('/reports')} className="w-full py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-xs font-bold uppercase tracking-wider border border-blue-500/30 transition-all">
+                      View Reports &amp; Audit →
+                    </button>
+                    <button onClick={() => { setStep(1); setSelectedZones([]); setSelectedSiteL(null); setRouteResult(null); setDecisionL(null); }} className="w-full py-1.5 text-slate-600 hover:text-slate-400 text-xs transition-all">
+                      Start new plan
+                    </button>
                   </div>
-                </div>
-              </div>
+                )}
 
-              <div className="p-8 bg-slate-900/30">
-                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-mono mb-4">Resource Allocation</div>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.04] flex flex-col items-center justify-center text-center">
-                    <UsersIcon size={24} className="text-blue-400 mb-2" />
-                    <div className="text-2xl font-extrabold font-mono text-white mb-1">{resources.ndrf}</div>
-                    <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">NDRF Teams</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.04] flex flex-col items-center justify-center text-center">
-                    <LocationIcon size={24} className="text-orange-400 mb-2" />
-                    <div className="text-2xl font-extrabold font-mono text-white mb-1">{resources.buses}</div>
-                    <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">Buses</div>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.04] flex flex-col items-center justify-center text-center">
-                    <ShieldAlertIcon size={24} className="text-red-400 mb-2" />
-                    <div className="text-2xl font-extrabold font-mono text-white mb-1">{resources.medical}</div>
-                    <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">Med Kits</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-8 border-t border-white/[0.06] bg-slate-950 flex items-center justify-between">
-                <div className="text-xs font-mono text-slate-500">
-                  Authorized by: <strong className="text-slate-300">ASDMA Command Center</strong>
-                </div>
-                <button
-                  onClick={handleDeploy}
-                  disabled={deployed}
-                  className={`px-8 py-3.5 rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-[0_4px_20px_rgba(37,99,235,0.4),inset_0_1px_0_rgba(255,255,255,0.2)] ${
-                    deployed 
-                      ? 'bg-emerald-600 text-white shadow-[0_4px_20px_rgba(5,150,105,0.4)]'
-                      : 'bg-blue-600 hover:bg-blue-500 text-white active:scale-[0.98]'
-                  }`}
-                >
-                  {deployed ? 'Orders Sent ✓' : 'Send to Field Teams'}
-                </button>
-              </div>
-            </motion.div>
+              </motion.div>
+            </AnimatePresence>
           )}
-        </AnimatePresence>
-        
-        {activeStep < 4 && (
-          <div className="mt-40 text-center text-slate-600 font-mono text-sm max-w-sm">
-            Complete the wizard on the left to generate the Deployment Manifest.
+        </div>
+      </div>
+
+      {/* ── Map ── */}
+      <div className="flex-1 min-w-0 relative">
+        <HazardMap
+          zones={mapZones}
+          sites={step >= 3 ? sites : []}
+          route={mapRoute}
+        />
+
+        {/* Step overlay hint */}
+        {step <= 3 && (
+          <div className="absolute top-4 left-4 z-20 px-3 py-1.5 rounded-lg bg-[#0c101d] border border-white/[0.15] shadow-xl">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">
+              STEP {step} — {STEPS[step-1]?.desc}
+            </div>
           </div>
         )}
-      </main>
+      </div>
     </div>
   )
 }

@@ -1,199 +1,417 @@
-// src/pages/ScenarioLab.jsx - What-if Scenario Lab
-import { useState, useEffect, useRef } from 'react'
-import { motion } from 'framer-motion'
-import { SlidersIcon, RefreshIcon, ShieldAlertIcon } from '../components/Icons'
+// src/pages/ScenarioLab.jsx (was: EventsPage/ScenarioLab)
+// ============================================================================
+// REDZONE — Scenario Lab
+// "What if conditions change? What happens to the map?"
+//
+// Map-first: scenario parameters directly change what appears on the map.
+// No simulation smoke — the map responds to sliders, not a card.
+//
+// Presets: Normal / Heavy Rain / River Surge / Extreme / Custom
+// View: Map shows projected zone classifications vs baseline
+// Backend: calls /api/scenario/what-if with geographic context
+//
+// DATA INTEGRITY:
+//   - All outputs labeled SIMULATED
+//   - No actual historical data fetched in SIMULATION mode
+//   - Projected scores compared against BASELINE (current), not invented delta
+//   - AI analysis is structural — uses real scoring formula with modified inputs
+// ============================================================================
 
-function Slider({ label, value, min, max, step = 0.1, unit = '', onChange, id }) {
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { useAppStore, MODES } from '../context/AppStore'
+import { api } from '../api/client'
+import HazardMap from '../components/HazardMap'
+
+// ── Scenario presets ──────────────────────────────────────────────────────────
+
+const PRESETS = [
+  {
+    id: 'normal',
+    label: 'Normal',
+    desc: 'Baseline — current observed conditions',
+    params: { rainfall_mm_24h: 0, river_level_delta_m: 0, soil_saturation_pct: 0 },
+    color: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10',
+  },
+  {
+    id: 'heavy_rain',
+    label: 'Heavy Rain',
+    desc: '80mm / 24h — moderate monsoon event',
+    params: { rainfall_mm_24h: 80, river_level_delta_m: 0.5, soil_saturation_pct: 60 },
+    color: 'text-blue-400 border-blue-500/30 bg-blue-500/10',
+  },
+  {
+    id: 'river_surge',
+    label: 'River Surge',
+    desc: 'River level +2m, rainfall 120mm/24h',
+    params: { rainfall_mm_24h: 120, river_level_delta_m: 2.0, soil_saturation_pct: 80 },
+    color: 'text-amber-400 border-amber-500/30 bg-amber-500/10',
+  },
+  {
+    id: 'extreme',
+    label: 'Extreme Flood',
+    desc: 'River level +4m, rainfall 200mm/24h',
+    params: { rainfall_mm_24h: 200, river_level_delta_m: 4.0, soil_saturation_pct: 100 },
+    color: 'text-red-400 border-red-500/30 bg-red-500/10',
+  },
+]
+
+// ── Slider component ──────────────────────────────────────────────────────────
+
+function ScenarioSlider({ label, value, min, max, step, unit, onChange, note }) {
+  const pct = ((value - min) / (max - min)) * 100
   return (
-    <div className="mb-5">
-      <div className="flex justify-between items-center text-xs mb-2">
-        <label htmlFor={id} className="text-slate-300 font-bold tracking-tight">{label}</label>
-        <span className="font-mono text-sm font-extrabold text-white bg-white/5 px-2 py-0.5 rounded">
-          {value > 0 ? '+' : ''}{value.toFixed(step < 0.1 ? 2 : 1)}
-          <span className="text-slate-500 font-sans ml-1 text-[10px] uppercase">{unit}</span>
-        </span>
+    <div className="py-2.5 border-b border-white/[0.04] last:border-0">
+      <div className="flex items-center justify-between mb-1">
+        <div className="text-[11px] font-semibold text-slate-300">{label}</div>
+        <div className="font-mono text-sm font-bold text-white tabular-nums">{value} <span className="text-slate-600 text-[10px]">{unit}</span></div>
       </div>
       <input
-        id={id}
         type="range"
-        min={min}
-        max={max}
-        step={step}
+        min={min} max={max} step={step}
         value={value}
-        onChange={e => onChange(Number(e.target.value))}
-        className="w-full h-2 rounded-full bg-white/[0.08] appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-all"
+        onChange={e => onChange(parseFloat(e.target.value))}
+        className="w-full h-1 rounded-full appearance-none bg-white/[0.08] cursor-pointer"
+        style={{
+          background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${pct}%, rgba(255,255,255,0.08) ${pct}%)`,
+        }}
       />
+      {note && <div className="text-[9px] text-slate-600 mt-0.5 font-mono">{note}</div>}
     </div>
   )
 }
 
-function StateCard({ title, isProjected, data }) {
-  const isCritical = data.riskScore > 80
+// ── Comparison row ────────────────────────────────────────────────────────────
+
+function ComparisonRow({ zone, baseline, projected }) {
+  const bScore = baseline?.hazard_score ?? null
+  const pScore = projected?.hazard_score ?? null
+  const bClf   = baseline?.classification
+  const pClf   = projected?.classification
+
+  const clfColors = {
+    immediate:   'text-red-400',
+    short_term:  'text-orange-400',
+    medium_term: 'text-amber-400',
+    stable:      'text-emerald-400',
+  }
+
+  const isWorse = pScore != null && bScore != null && pScore > bScore
+  const delta   = pScore != null && bScore != null ? Math.round((pScore - bScore) * 100) : null
+
   return (
-    <div className={`p-6 rounded-2xl border backdrop-blur-xl relative overflow-hidden ${
-      isProjected ? 'bg-slate-900/60 border-blue-500/30 shadow-[0_20px_50px_rgba(37,99,235,0.15)]' : 'bg-slate-950/60 border-white/[0.08]'
-    }`}>
-      {isProjected && (
-        <div className="absolute top-0 right-0 px-3 py-1 bg-blue-600/20 text-blue-400 text-[9px] font-bold tracking-widest uppercase rounded-bl-lg border-b border-l border-blue-500/30">
-          Simulated
-        </div>
-      )}
-      <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500 font-mono mb-4">{title}</div>
-      
-      <div className="flex items-center gap-4 mb-6">
-        <div className={`w-16 h-16 rounded-xl flex items-center justify-center text-2xl font-extrabold font-mono border ${
-          isCritical ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-        }`}>
-          {data.riskScore}
-        </div>
-        <div>
-          <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Risk Score</div>
-          <div className={`text-sm font-extrabold uppercase tracking-widest ${isCritical ? 'text-red-400' : 'text-amber-400'}`}>
-            {isCritical ? 'CRITICAL' : 'WARNING'}
-          </div>
+    <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.04] last:border-0">
+      <div className="flex-1 min-w-0">
+        <div className="text-[11px] font-semibold text-slate-300 truncate">{zone.name}</div>
+        <div className="text-[9px] text-slate-600 truncate">{zone.district}</div>
+      </div>
+      {/* Baseline */}
+      <div className="text-right w-10">
+        <div className={`text-xs font-extrabold font-mono ${clfColors[bClf] ?? 'text-slate-600'}`}>
+          {bScore != null ? Math.round(bScore * 100) : '—'}
         </div>
       </div>
-
-      <div className="space-y-4">
-        <div>
-          <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-            <span>Flood Probability</span>
-            <span className="font-mono text-slate-300">{data.floodProb}%</span>
-          </div>
-          <div className="w-full h-1.5 rounded-full bg-white/5"><div className="h-full rounded-full bg-blue-500 transition-all" style={{width: `${data.floodProb}%`}}/></div>
+      {/* Arrow */}
+      <div className={`text-[9px] font-mono ${isWorse ? 'text-red-400' : delta != null && delta < 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+        {delta != null ? (isWorse ? `+${delta}` : `${delta}`) : '→'}
+      </div>
+      {/* Projected */}
+      <div className="text-right w-10">
+        <div className={`text-xs font-extrabold font-mono ${clfColors[pClf] ?? 'text-slate-600'}`}>
+          {pScore != null ? Math.round(pScore * 100) : '—'}
         </div>
-        <div>
-          <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-            <span>Erosion Risk</span>
-            <span className="font-mono text-slate-300">{data.erosionRisk}%</span>
-          </div>
-          <div className="w-full h-1.5 rounded-full bg-white/5"><div className="h-full rounded-full bg-orange-500 transition-all" style={{width: `${data.erosionRisk}%`}}/></div>
-        </div>
-        <div>
-          <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
-            <span>Road Access</span>
-            <span className="font-mono text-slate-300">{data.roadAccess}%</span>
-          </div>
-          <div className="w-full h-1.5 rounded-full bg-white/5"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{width: `${data.roadAccess}%`}}/></div>
-        </div>
+        <div className="text-[8px] text-blue-400 font-mono uppercase">SIM</div>
       </div>
     </div>
   )
 }
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 export default function ScenarioLab() {
-  const [params, setParams] = useState({ river: 0, rain: 0, erosion: 0 })
-  const [loading, setLoading] = useState(false)
+  const {
+    area, mode, setMode, setScenarioParams, setScenarioPreset,
+    setScenarioBaseline, setScenarioProjection, scenarioBaseline, scenarioProjection,
+    resetScenario,
+  } = useAppStore()
 
-  // Derived state based on sliders
-  const currentData = { riskScore: 68, floodProb: 45, erosionRisk: 60, roadAccess: 92 }
-  const projectedData = {
-    riskScore: Math.min(100, 68 + params.river * 12 + params.rain * 0.15 + params.erosion * 5),
-    floodProb: Math.min(100, 45 + params.river * 15 + params.rain * 0.2),
-    erosionRisk: Math.min(100, 60 + params.erosion * 8 + params.river * 5),
-    roadAccess: Math.max(0, 92 - params.river * 10 - params.rain * 0.2)
+  const [zones,          setZones]          = useState([])
+  const [activePreset,   setActivePreset]   = useState('normal')
+  const [params,         setParams]         = useState({
+    rainfall_mm_24h:       0,
+    river_level_delta_m:   0,
+    soil_saturation_pct:   0,
+  })
+  const [running,        setRunning]        = useState(false)
+  const [runError,       setRunError]       = useState(null)
+  const [projectedZones, setProjectedZones] = useState([])
+  const debounceRef = useRef(null)
+
+  // Load baseline zones
+  useEffect(() => {
+    if (!area) { setZones([]); setProjectedZones([]); return }
+    api.zones({ lat: area.lat, lon: area.lon, radius_km: 100 })
+      .then(data => {
+        setZones(data ?? [])
+        setScenarioBaseline(data ?? [])
+      })
+      .catch(() => setZones([]))
+  }, [area, setScenarioBaseline])
+
+  const runScenario = useCallback(async (currentParams) => {
+    if (!area) return
+    setRunning(true)
+    setRunError(null)
+
+    // Enter simulation mode
+    setMode(MODES.SIMULATION)
+    setScenarioParams(currentParams)
+
+    try {
+      const result = await api.whatIf({
+        lat:       area.lat,
+        lon:       area.lon,
+        radius_km: 100,
+        ...currentParams,
+      })
+
+      const projected = result?.zones ?? result ?? []
+      setProjectedZones(projected)
+      setScenarioProjection(projected)
+    } catch (err) {
+      setRunError('Scenario engine unavailable — backend not running')
+      // Show baseline as projected when backend unavailable
+      setProjectedZones([])
+    } finally {
+      setRunning(false)
+    }
+  }, [area, setMode, setScenarioParams, setScenarioProjection])
+
+  const handlePreset = (preset) => {
+    setActivePreset(preset.id)
+    setScenarioPreset(preset.id)
+    const newParams = { ...params, ...preset.params }
+    setParams(newParams)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => runScenario(newParams), 400)
   }
 
-  // Format to integer
-  Object.keys(projectedData).forEach(k => projectedData[k] = Math.round(projectedData[k]))
-
-  const handleParamChange = (key, val) => {
-    setLoading(true)
-    setParams(p => ({ ...p, [key]: val }))
-    setTimeout(() => setLoading(false), 300)
+  const handleParamChange = (key, value) => {
+    setActivePreset('custom')
+    const newParams = { ...params, [key]: value }
+    setParams(newParams)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => runScenario(newParams), 800)
   }
+
+  const handleReset = () => {
+    setActivePreset('normal')
+    setParams({ rainfall_mm_24h: 0, river_level_delta_m: 0, soil_saturation_pct: 0 })
+    setProjectedZones([])
+    resetScenario()
+  }
+
+  // Map shows projected zones if available, else baseline
+  const mapZones = projectedZones.length > 0 ? projectedZones : zones
+
+  const immediateProjected = projectedZones.filter(z => z.classification === 'immediate').length
+  const immediateBaseline  = zones.filter(z => z.classification === 'immediate').length
+  const delta              = immediateProjected - immediateBaseline
 
   return (
-    <div className="h-full flex bg-[#090d16] overflow-hidden">
-      {/* Controls Sidebar */}
-      <div className="w-80 shrink-0 border-r border-white/[0.08] bg-slate-950/80 backdrop-blur-xl overflow-y-auto z-10 shadow-[10px_0_30px_rgba(0,0,0,0.5)]">
-        <div className="p-6 border-b border-white/[0.08] bg-slate-900/30">
-          <div className="flex items-center gap-2 mb-1">
-            <SlidersIcon size={16} className="text-blue-400" />
-            <h1 className="text-xl font-extrabold text-white tracking-tight uppercase">Scenario Lab</h1>
+    <div className="flex flex-1 h-full min-h-0 overflow-hidden">
+
+      {/* ── Control panel ── */}
+      <div className="w-72 shrink-0 flex flex-col border-r border-white/[0.06] bg-[#0b0f1a]/95 overflow-hidden">
+
+        {/* Header */}
+        <div className="px-4 py-3 border-b border-white/[0.06] shrink-0">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-500 font-mono">SCENARIO LAB</span>
+            {mode === 'SIMULATION' && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded border text-[8px] font-bold font-mono bg-blue-500/10 border-blue-500/30 text-blue-400">
+                <span className="w-1 h-1 rounded-full bg-blue-400 animate-pulse" />SIMULATION
+              </div>
+            )}
           </div>
-          <p className="text-xs text-slate-400 font-medium">
-            Test hypothetical environmental stress on habitations.
-          </p>
+          {area ? (
+            <div className="text-xs text-slate-400">Scenarios for <span className="font-bold text-slate-200">{area.name}</span></div>
+          ) : (
+            <div className="text-xs text-slate-600 italic">Search for an area first</div>
+          )}
         </div>
 
-        <div className="p-6">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-5 font-mono">
-            Environmental Stressors
+        {/* Presets */}
+        <div className="p-3 border-b border-white/[0.06] shrink-0">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-slate-600 font-mono mb-2">PRESET SCENARIOS</div>
+          <div className="space-y-1.5">
+            {PRESETS.map(preset => (
+              <button
+                key={preset.id}
+                onClick={() => handlePreset(preset)}
+                disabled={!area}
+                className={`w-full text-left px-3 py-2 rounded-lg border transition-all disabled:opacity-30 ${
+                  activePreset === preset.id ? preset.color : 'border-white/[0.06] text-slate-500 hover:text-slate-300 hover:bg-white/[0.03]'
+                }`}
+              >
+                <div className="text-xs font-bold">{preset.label}</div>
+                <div className="text-[9px] opacity-70 mt-0.5">{preset.desc}</div>
+              </button>
+            ))}
           </div>
-          <Slider 
-            id="sl-river" 
-            label="River Level Anomaly" 
-            value={params.river} 
-            min={0} max={3.5} step={0.1} unit="m" 
-            onChange={v => handleParamChange('river', v)} 
-          />
-          <Slider 
-            id="sl-rain" 
-            label="Excess Rainfall" 
-            value={params.rain} 
-            min={0} max={200} step={5} unit="mm/24h" 
-            onChange={v => handleParamChange('rain', v)} 
-          />
-          <Slider 
-            id="sl-erosion" 
-            label="Erosion Rate Shift" 
-            value={params.erosion} 
-            min={0} max={5} step={0.5} unit="m/yr" 
-            onChange={v => handleParamChange('erosion', v)} 
-          />
+        </div>
 
-          <button 
-            onClick={() => setParams({ river: 0, rain: 0, erosion: 0 })}
-            className="w-full mt-6 py-2.5 rounded-lg border border-white/[0.08] bg-white/[0.02] hover:bg-white/[0.05] text-xs font-bold text-slate-300 uppercase tracking-widest transition-all"
+        {/* Custom sliders */}
+        <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="p-4">
+            <div className="text-[9px] font-bold uppercase tracking-widest text-slate-600 font-mono mb-3">CUSTOM PARAMETERS</div>
+            <ScenarioSlider
+              label="Rainfall"
+              value={params.rainfall_mm_24h}
+              min={0} max={300} step={5}
+              unit="mm/24h"
+              onChange={v => handleParamChange('rainfall_mm_24h', v)}
+              note="Affects live trigger multiplier (>15mm/hr activates)"
+            />
+            <ScenarioSlider
+              label="River Level Rise"
+              value={params.river_level_delta_m}
+              min={0} max={6} step={0.1}
+              unit="m above normal"
+              onChange={v => handleParamChange('river_level_delta_m', v)}
+              note="Delta from current gauge reading"
+            />
+            <ScenarioSlider
+              label="Soil Saturation"
+              value={params.soil_saturation_pct}
+              min={0} max={100} step={5}
+              unit="%"
+              onChange={v => handleParamChange('soil_saturation_pct', v)}
+              note="Increases terrain vulnerability score"
+            />
+
+            {/* Labels */}
+            <div className="mt-3 p-2 rounded-lg border border-blue-500/20 bg-blue-500/5 text-[9px] text-blue-400/80 leading-relaxed font-mono">
+              All outputs labeled SIMULATED. Parameters modify the live trigger multiplier and terrain vulnerability components of the hazard formula. Backend applies the real scoring engine to modified inputs.
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="p-3 border-t border-white/[0.06] shrink-0 space-y-2">
+          {running && (
+            <div className="flex items-center gap-2 text-[10px] text-blue-400 font-mono">
+              <div className="w-3 h-3 border border-blue-400/30 border-t-blue-400 rounded-full animate-spin" />
+              Running scenario...
+            </div>
+          )}
+          {runError && (
+            <div className="text-[10px] text-amber-400 font-mono">{runError}</div>
+          )}
+          <button
+            onClick={handleReset}
+            disabled={!area || mode !== 'SIMULATION'}
+            className="w-full py-1.5 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] text-slate-500 hover:text-slate-300 text-xs font-bold uppercase tracking-wider border border-white/[0.06] transition-all disabled:opacity-30"
           >
-            Reset Scenario
+            Reset to Baseline
           </button>
         </div>
       </div>
 
-      {/* Main Canvas: Split Layout */}
-      <div className="flex-1 overflow-y-auto p-10 relative flex flex-col">
-        {/* Background Grid Pattern */}
-        <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
+      {/* ── Map ── */}
+      <div className="flex-1 min-w-0 relative">
+        <HazardMap zones={mapZones} sites={[]} />
 
-        <div className="flex items-center justify-between mb-8 relative z-10">
-          <div>
-            <h2 className="text-2xl font-extrabold text-white tracking-tight uppercase">Impact Projection</h2>
-            <div className="text-sm font-mono text-slate-400 mt-1">Betkuchandi Dyke Colony</div>
-          </div>
-          {loading && (
-            <div className="flex items-center gap-2 text-xs font-bold text-blue-400 font-mono tracking-widest uppercase">
-              <RefreshIcon size={14} className="animate-spin" />
-              <span>Simulating...</span>
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-2 gap-8 relative z-10 flex-1">
-          <StateCard title="Current State (Baseline)" isProjected={false} data={currentData} />
-          
-          <div className="relative">
-            {/* Visual connector between cards */}
-            <div className="absolute top-1/2 -left-4 w-4 border-t-2 border-dashed border-white/20 -translate-y-1/2 z-0" />
-            <div className="absolute top-1/2 left-0 w-2 h-2 rounded-full bg-blue-500 -translate-x-1/2 -translate-y-1/2 z-10 shadow-[0_0_10px_rgba(59,130,246,1)]" />
-            
-            <StateCard title="Projected State (+48h)" isProjected={true} data={projectedData} />
-          </div>
-        </div>
-        
-        {projectedData.riskScore > 80 && (
-          <div className="mt-8 p-4 rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 flex items-center justify-between shadow-[0_0_20px_rgba(239,68,68,0.15)] relative z-10">
-            <div className="flex items-center gap-3">
-              <ShieldAlertIcon size={24} className="text-red-400 animate-pulse" />
-              <div>
-                <strong className="text-sm font-extrabold text-white uppercase tracking-tight block">Threshold Exceeded</strong>
-                <span className="text-xs font-medium">Scenario triggers immediate mandatory evacuation protocols.</span>
+        {/* Simulation overlay */}
+        <AnimatePresence>
+          {mode === 'SIMULATION' && projectedZones.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="absolute top-4 left-4 z-20 bg-[#0c101d] border border-blue-500/40 rounded-xl p-3 shadow-2xl"
+            >
+              <div className="text-[9px] font-bold uppercase tracking-widest text-blue-400 font-mono mb-2">SIMULATION RESULTS</div>
+              <div className="flex items-center gap-3">
+                <div>
+                  <div className="text-[9px] text-slate-600 font-mono">BASELINE</div>
+                  <div className="text-lg font-extrabold font-mono text-slate-300">{immediateBaseline}</div>
+                  <div className="text-[9px] text-slate-600">immediate</div>
+                </div>
+                <div className="text-slate-600">→</div>
+                <div>
+                  <div className="text-[9px] text-blue-400 font-mono">SIMULATED</div>
+                  <div className={`text-lg font-extrabold font-mono ${delta > 0 ? 'text-red-400' : delta < 0 ? 'text-emerald-400' : 'text-slate-300'}`}>
+                    {immediateProjected}
+                  </div>
+                  <div className="text-[9px] text-slate-600">immediate</div>
+                </div>
+                {delta !== 0 && (
+                  <div className={`text-sm font-extrabold font-mono ${delta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                    {delta > 0 ? `+${delta}` : `${delta}`}
+                  </div>
+                )}
               </div>
+              <div className="mt-2 text-[8px] text-blue-400/60 font-mono">DATA STATUS: SIMULATED</div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* No area prompt */}
+        {!area && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+            <div className="text-center">
+              <div className="text-xs font-bold text-slate-600 uppercase tracking-widest mb-1">SCENARIO LAB</div>
+              <div className="text-[11px] text-slate-700">Search for an area, then run scenario presets or adjust parameters</div>
             </div>
           </div>
         )}
       </div>
+
+      {/* ── Comparison panel (visible when simulation ran) ── */}
+      <AnimatePresence>
+        {projectedZones.length > 0 && zones.length > 0 && (
+          <motion.div
+            key="comparison"
+            initial={{ x: 40, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: 40, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 150, damping: 22 }}
+            className="w-64 shrink-0 flex flex-col border-l border-white/[0.06] bg-[#0b0f1a]/95 overflow-hidden"
+          >
+            {/* Header */}
+            <div className="px-3 py-2.5 border-b border-white/[0.06] shrink-0">
+              <div className="text-[9px] font-bold uppercase tracking-widest text-slate-500 font-mono">BASELINE vs SIMULATED</div>
+            </div>
+
+            {/* Column labels */}
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/[0.04] shrink-0 bg-white/[0.01]">
+              <div className="flex-1 text-[9px] text-slate-600 font-mono">ZONE</div>
+              <div className="w-10 text-right text-[9px] text-slate-600 font-mono">BASE</div>
+              <div className="w-4" />
+              <div className="w-10 text-right text-[9px] text-blue-400 font-mono">SIM</div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto min-h-0">
+              {zones.slice(0, 20).map(z => {
+                const proj = projectedZones.find(p => p.habitation_id === z.habitation_id)
+                return (
+                  <ComparisonRow
+                    key={z.habitation_id}
+                    zone={z}
+                    baseline={z}
+                    projected={proj ?? null}
+                  />
+                )
+              })}
+            </div>
+
+            <div className="p-3 border-t border-white/[0.04] shrink-0 text-[9px] text-slate-700 font-mono">
+              All projected values: SIMULATED — Formula: hazard_engine.py with modified inputs
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

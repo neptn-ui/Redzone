@@ -1,373 +1,550 @@
-import { useEffect, useRef, useState } from 'react'
-import L from 'leaflet'
+// src/components/HazardMap.jsx
+// ============================================================================
+// REDZONE — Primary GIS Map Surface (HAZARD-LAYER ARCHITECTURE)
+//
+// The map is the product. It changes completely when hazard type changes.
+//
+// Hazard Type → Layer Renderer:
+//   FLOOD      → FloodRenderer     (OSM rivers + modelled inundation)
+//   EROSION    → ErosionRenderer   (OSM channel + modelled corridor)
+//   LANDSLIDE  → LandslideRenderer (susceptibility zones + roads)
+//   EARTHQUAKE → EarthquakeRenderer (USGS epicenter + intensity rings)
+//   (none)     → Settlement markers only
+//
+// Data loading:
+//   1. OSM Overpass API  — rivers, roads, bridges, infra (REAL)
+//   2. USGS Earthquake   — recent seismic events        (REAL)
+//   3. Backend zones     — exposed settlements           (MODELLED)
+//   4. Layer renderer    — calls appropriate factory
+//
+// All layers labeled REAL / MODELLED / UNAVAILABLE.
+// ============================================================================
+
+import { useEffect, useRef, useState, useCallback } from 'react'
 import 'leaflet/dist/leaflet.css'
+import { useAppStore } from '../context/AppStore'
+import MapInspectorPanel from './MapInspectorPanel'
+import { HazardLegend } from './hazard-layers/HazardLegend'
+import {
+  createFloodLayers,
+  createErosionLayers,
+  createLandslideLayers,
+  createEarthquakeLayers,
+} from './hazard-layers/renderers'
+import {
+  fetchRivers, fetchMajorRoads, fetchBridges,
+  fetchInfrastructure, fetchRecentEarthquakes,
+} from '../api/overpass'
 
+// ── Leaflet lazy loader ───────────────────────────────────────────────────────
+
+let _L = null
 function getLeaflet() {
-  if (typeof window !== 'undefined' && window.L) return window.L
-  if (L && L.map) return L
-  if (L && L.default && L.default.map) return L.default
-  return L || null
+  if (_L) return Promise.resolve(_L)
+  return import('leaflet').then(mod => {
+    _L = mod.default
+    delete _L.Icon.Default.prototype._getIconUrl
+    _L.Icon.Default.mergeOptions({
+      iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+      iconUrl:       'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+      shadowUrl:     'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+    })
+    return _L
+  })
 }
 
-const RISK_COLORS = {
-  immediate:   '#ef4444',
-  short_term:  '#f97316',
-  medium_term: '#eab308',
-  stable:      '#22c55e',
+// ── Hazard type configuration ────────────────────────────────────────────────
+
+const HAZARD_TYPES = [
+  { id: null,         label: 'Overview',   color: 'text-slate-400' },
+  { id: 'flood',      label: 'Flood',      color: 'text-blue-400' },
+  { id: 'erosion',    label: 'Erosion',    color: 'text-orange-400' },
+  { id: 'landslide',  label: 'Landslide',  color: 'text-amber-400' },
+  { id: 'earthquake', label: 'Earthquake', color: 'text-red-400' },
+]
+
+// ── Settlement colours ────────────────────────────────────────────────────────
+
+const CLF_COLOR = {
+  immediate:   { fill: '#ef4444', stroke: '#ffffff' },
+  short_term:  { fill: '#f97316', stroke: '#ffffff' },
+  medium_term: { fill: '#f59e0b', stroke: '#ffffff' },
+  stable:      { fill: '#22c55e', stroke: '#ffffff' },
 }
 
-function markerRadius(population) {
-  if (population > 8000) return 16
-  if (population > 4000) return 12
-  if (population > 1500) return 9
-  return 6
-}
-
-function popupHTML(zone) {
-  const color = RISK_COLORS[zone.classification] || '#94a3b8'
+function settlementPopup(zone) {
+  const c = CLF_COLOR[zone.classification] ?? CLF_COLOR.stable
+  const score = zone.hazard_score != null ? (zone.hazard_score * 100).toFixed(0) : '—'
+  const clf = (zone.classification ?? 'unknown').replace(/_/g, ' ').toUpperCase()
   return `
-    <div style="min-width:210px;font-family:'Outfit',-apple-system,sans-serif;padding:2px 4px">
-      <div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:4px;letter-spacing:-0.01em">${zone.name}</div>
-      <div style="font-size:10px;font-mono;color:#60a5fa;margin-bottom:8px">${zone.district || 'Assam'} District</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-        <span style="padding:2px 8px;border-radius:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;background:${color}18;border:1px solid ${color}40;color:${color}">
-          ${zone.classification.replace('_', ' ')}
-        </span>
+    <div style="font-family:'Outfit',system-ui,sans-serif;min-width:200px">
+      <div style="font-size:10px;font-weight:800;color:${c.fill};text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px">${clf}</div>
+      <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:6px">${zone.name ?? '—'}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+        <div style="padding:3px 6px;background:rgba(255,255,255,.04);border-radius:5px">
+          <div style="font-size:8px;color:#64748b;text-transform:uppercase;font-weight:700">HAZARD</div>
+          <div style="font-size:15px;font-weight:800;color:${c.fill};font-feature-settings:'tnum'">${score}</div>
+          <div style="font-size:8px;color:#334155">MODELLED</div>
+        </div>
+        <div style="padding:3px 6px;background:rgba(255,255,255,.04);border-radius:5px">
+          <div style="font-size:8px;color:#64748b;text-transform:uppercase;font-weight:700">POP</div>
+          <div style="font-size:15px;font-weight:800;color:#f1f5f9;font-feature-settings:'tnum'">${(zone.population ?? 0).toLocaleString()}</div>
+          <div style="font-size:8px;color:#334155">STATIC</div>
+        </div>
       </div>
-      <div style="font-size:12px;color:#94a3b8;line-height:1.75">
-        <div style="display:flex;justify-content:space-between"><span>Hazard Index:</span><strong style="color:#f1f5f9;font-family:'JetBrains Mono',monospace">${(zone.hazard_score * 100).toFixed(0)} / 100</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Urgency Index:</span><strong style="color:#f1f5f9;font-family:'JetBrains Mono',monospace">${(zone.urgency_score * 100).toFixed(0)} / 100</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Population:</span><strong style="color:#f1f5f9;font-family:'JetBrains Mono',monospace">${(zone.population || 0).toLocaleString()}</strong></div>
-        ${zone.matched_site ? `<div style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.08);color:#60a5fa;font-size:11px">Safe Parcel: <strong>${zone.matched_site}</strong></div>` : ''}
-      </div>
-      <div style="margin-top:10px;font-size:11px;font-weight:600;color:#3b82f6;cursor:pointer">Open Full Audit Breakdown →</div>
-    </div>
-  `
+    </div>`
 }
 
-function sitePopupHTML(site) {
+function sitePopup(site) {
+  const score = site.capacity_score != null ? (site.capacity_score * 100).toFixed(0) : '—'
   return `
-    <div style="min-width:190px;font-family:'Outfit',-apple-system,sans-serif;padding:2px 4px">
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-        <div style="width:8px;height:8px;background:#3b82f6;transform:rotate(45deg);box-shadow:0 0 6px #3b82f6"></div>
-        <div style="font-size:13px;font-weight:700;color:#60a5fa">${site.name}</div>
+    <div style="font-family:'Outfit',system-ui,sans-serif;min-width:180px">
+      <div style="font-size:10px;font-weight:800;color:#3b82f6;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px">SAFE SITE</div>
+      <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:6px">${site.name ?? '—'}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+        <div style="padding:3px 6px;background:rgba(59,130,246,.08);border-radius:5px;border:1px solid rgba(59,130,246,.2)">
+          <div style="font-size:8px;color:#64748b;font-weight:700">CAPACITY</div>
+          <div style="font-size:15px;font-weight:800;color:#60a5fa">${site.available_capacity ?? '—'}</div>
+        </div>
+        <div style="padding:3px 6px;background:rgba(59,130,246,.08);border-radius:5px;border:1px solid rgba(59,130,246,.2)">
+          <div style="font-size:8px;color:#64748b;font-weight:700">SCORE</div>
+          <div style="font-size:15px;font-weight:800;color:#60a5fa">${score}%</div>
+          <div style="font-size:8px;color:#334155">MODELLED</div>
+        </div>
       </div>
-      <div style="font-size:10px;font-mono;color:#94a3b8;margin-bottom:6px">${site.district || 'Assam'} · Highland Safe Parcel</div>
-      <div style="font-size:12px;color:#94a3b8;line-height:1.75">
-        <div style="display:flex;justify-content:space-between"><span>Capacity Score:</span><strong style="color:#f1f5f9;font-family:'JetBrains Mono',monospace">${(site.capacity_score * 100).toFixed(0)}%</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Available:</span><strong style="color:#f1f5f9;font-family:'JetBrains Mono',monospace">${(site.available_capacity || 0).toLocaleString()} ppl</strong></div>
-        <div style="display:flex;justify-content:space-between"><span>Slope:</span><strong style="color:#f1f5f9;font-family:'JetBrains Mono',monospace">${site.slope_degrees}°</strong></div>
-      </div>
-    </div>
-  `
+    </div>`
 }
 
-export default function HazardMap({ zones = [], sites = [], selectedId, onSelect, route = null }) {
+// ── Main Component ────────────────────────────────────────────────────────────
+
+export default function HazardMap({
+  zones    = [],
+  sites    = [],
+  route    = null,
+  onZoneSelect = null,
+}) {
   const containerRef = useRef(null)
   const mapRef       = useRef(null)
-  const tileLayerRef = useRef(null)
-  const routeLineRef = useRef(null)
-  const [mapInstance, setMapInstance] = useState(null)
-  const [mapMode, setMapMode] = useState('dark') // 'dark' | 'satellite'
-  const [activeLayer, setActiveLayer] = useState('RISK')
-  const markersRef   = useRef([])
-  const siteMarksRef = useRef([])
+  const prevAreaRef  = useRef(null)
 
-  // Init map once with async retry
+  // Layer group refs — each cleared before new hazard renders
+  const hazardGroupRef  = useRef(null)
+  const settlementGrpRef= useRef(null)
+  const siteGrpRef      = useRef(null)
+  const routeGrpRef     = useRef(null)
+
+  const { area, activeLayers, hazard, setHazard, setSelectedFeature } = useAppStore()
+
+  const [activeHazard, setActiveHazard] = useState(hazard?.type ?? null)
+  const [osmData,      setOsmData]      = useState({ rivers: [], roads: [], bridges: [], infra: [], earthquakes: null })
+  const leafletRef     = useRef(null)     // the actual L instance
+  const [mapReady, setMapReady] = useState(false)  // triggers hazard re-render
+  const [osmLoading,   setOsmLoading]   = useState(false)
+  const [osmError,     setOsmError]     = useState(null)
+  const [hazardResult, setHazardResult] = useState({ legend: [], dataStatus: [] })
+
+  // Sync external hazard state (e.g. from Historical Replay or Scenario Lab) to local map state
   useEffect(() => {
-    let active = true
+    setActiveHazard(hazard?.type ?? null)
+  }, [hazard?.type])
 
-    function init() {
-      if (!active || !containerRef.current) return
-      const Leaf = getLeaflet()
-      if (!Leaf) {
-        setTimeout(init, 80)
-        return
-      }
+  // ── Init Leaflet ──────────────────────────────────────────────────────────
 
-      if (mapRef.current) {
-        try {
-          mapRef.current.remove()
-        } catch (e) {}
-        mapRef.current = null
-      }
-      if (containerRef.current._leaflet_id) {
-        containerRef.current._leaflet_id = null
-      }
+  useEffect(() => {
+    if (!containerRef.current) return
+    let map
+    let resizeObserver = null
 
-      try {
-        const map = Leaf.map(containerRef.current, {
-          center: [26.20, 93.80],
-          zoom: 8,
-          zoomControl: true,
-          attributionControl: true,
+    getLeaflet().then(L => {
+      if (mapRef.current || !containerRef.current) return
+
+      map = L.map(containerRef.current, {
+        center: [20.59, 78.96],
+        zoom: 5,
+        minZoom: 3,
+        maxBounds: [[-85, -180], [85, 180]],
+        maxBoundsViscosity: 1.0,
+        worldCopyJump: false,
+        zoomControl: false,
+        attributionControl: true,
+      })
+
+      // ESRI World Imagery satellite
+      L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        {
+          attribution: 'Tiles &copy; Esri &mdash; Esri, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN',
+          maxZoom: 19,
+          opacity: 0.95,
+          noWrap: true,
+          bounds: [[-85, -180], [85, 180]],
+        }
+      ).addTo(map)
+
+      // ESRI label overlay
+      L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+        {
+          maxZoom: 19,
+          opacity: 0.85,
+          noWrap: true,
+          bounds: [[-85, -180], [85, 180]],
+        }
+      ).addTo(map)
+
+      L.control.zoom({ position: 'bottomright' }).addTo(map)
+      L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map)
+
+      // Add pulse keyframe to map container
+      const style = document.createElement('style')
+      style.textContent = `@keyframes epi-pulse { 0%{opacity:0.8;transform:scale(1)} 70%{opacity:0;transform:scale(3)} 100%{opacity:0;transform:scale(3)} }`
+      map.getContainer().appendChild(style)
+
+      mapRef.current = map
+      leafletRef.current = L
+      _L = L
+      setMapReady(true)  // signal that Leaflet is ready — triggers hazard layer effects
+
+      // Force recalculation once DOM flex layout settles
+      setTimeout(() => {
+        if (mapRef.current) {
+          mapRef.current.invalidateSize({ debounceMoveend: true })
+        }
+      }, 100)
+      setTimeout(() => {
+        if (mapRef.current) {
+          mapRef.current.invalidateSize({ debounceMoveend: true })
+        }
+      }, 400)
+
+      // Automatic resize observer: recalculate dimensions whenever panels open/close or window resizes
+      if (window.ResizeObserver && containerRef.current) {
+        resizeObserver = new ResizeObserver(() => {
+          if (mapRef.current) {
+            mapRef.current.invalidateSize({ debounceMoveend: true })
+          }
         })
-        mapRef.current = map
-        setMapInstance(map)
-
-        // Use high-performance Esri Dark Gray Canvas tiles (reliable, dark theme)
-        const darkTiles = Leaf.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-          attribution: '&copy; Esri, HERE, Garmin, FAO, NOAA, USGS',
-          maxZoom: 16,
-        }).addTo(map)
-        tileLayerRef.current = darkTiles
-
-        setTimeout(() => map.invalidateSize(), 100)
-        setTimeout(() => map.invalidateSize(), 300)
-        setTimeout(() => map.invalidateSize(), 800)
-      } catch (err) {
-        console.error('Leaflet init error:', err)
+        resizeObserver.observe(containerRef.current)
       }
-    }
-
-    init()
-
-    const onResize = () => mapRef.current?.invalidateSize()
-    window.addEventListener('resize', onResize)
+    })
 
     return () => {
-      active = false
-      window.removeEventListener('resize', onResize)
-      if (mapRef.current) {
-        try {
-          mapRef.current.remove()
-        } catch (e) {}
-        mapRef.current = null
-      }
-      setMapInstance(null)
-      if (containerRef.current) {
-        containerRef.current._leaflet_id = null
-      }
+      if (resizeObserver) resizeObserver.disconnect()
+      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null }
+      leafletRef.current = null
+      setMapReady(false)
     }
   }, [])
 
-  // Handle Layer Toggle (Dark vs Satellite)
-  const toggleMapMode = (mode) => {
-    setMapMode(mode)
-    const Leaf = getLeaflet()
-    const map = mapRef.current
-    if (!Leaf || !map) return
+  // ── Fly to area ───────────────────────────────────────────────────────────
 
-    if (tileLayerRef.current) {
-      map.removeLayer(tileLayerRef.current)
-    }
-
-    if (mode === 'satellite') {
-      tileLayerRef.current = Leaf.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-        attribution: '&copy; Esri, Maxar, Earthstar Geographics',
-        maxZoom: 18,
-      }).addTo(map)
-    } else {
-      tileLayerRef.current = Leaf.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-        attribution: '&copy; Esri, HERE, Garmin, FAO, NOAA, USGS',
-        maxZoom: 16,
-      }).addTo(map)
-    }
-  }
-
-  // Update habitation markers
   useEffect(() => {
-    const Leaf = getLeaflet()
-    const map = mapInstance || mapRef.current
-    if (!Leaf || !map) return
+    const map = mapRef.current
+    if (!map || !area) return
+    const key = `${area.lat},${area.lon}`
+    if (prevAreaRef.current === key) return
+    prevAreaRef.current = key
 
-    map.invalidateSize()
+    if (area.bbox) {
+      try {
+        map.flyToBounds(
+          [[area.bbox.south, area.bbox.west], [area.bbox.north, area.bbox.east]],
+          { duration: 1.2, padding: [40, 40] }
+        )
+        return
+      } catch {}
+    }
+    map.flyTo([area.lat, area.lon], area.zoom ?? 11, { duration: 1.2 })
+  }, [area])
 
-    markersRef.current.forEach(m => m.remove())
-    markersRef.current = []
+  // ── Load OSM data when area changes ──────────────────────────────────────
+  const prevOsmAreaRef = useRef(null)
 
-    zones.forEach(zone => {
-      const color  = RISK_COLORS[zone.classification] || '#94a3b8'
-      const radius = markerRadius(zone.population)
-      const isSelected = zone.habitation_id === selectedId
+  useEffect(() => {
+    if (!area?.lat || !area?.lon) {
+      setOsmData({ rivers: [], roads: [], bridges: [], infra: [], earthquakes: null })
+      setOsmLoading(false)
+      return
+    }
 
-      const circle = Leaf.circleMarker([zone.lat, zone.lon], {
-        radius,
-        color: isSelected ? '#ffffff' : color,
-        weight: isSelected ? 3 : 1.5,
-        opacity: 1,
-        fillColor: color,
-        fillOpacity: 0.85,
-        className: zone.classification === 'immediate' ? 'animate-risk-pulse' : '',
+    const areaKey = `${Number(area.lat).toFixed(3)},${Number(area.lon).toFixed(3)}`
+    if (prevOsmAreaRef.current === areaKey) {
+      return
+    }
+    prevOsmAreaRef.current = areaKey
+
+    let isCurrent = true
+    setOsmLoading(true)
+    setOsmError(null)
+
+    // Hard safety timeout: loader never spins longer than 4.5 seconds
+    const safetyTimer = setTimeout(() => {
+      if (isCurrent) setOsmLoading(false)
+    }, 4500)
+
+    const radius = (area.zoom ?? 11) >= 12 ? 15000 : (area.zoom ?? 11) >= 10 ? 30000 : 45000
+
+    Promise.allSettled([
+      fetchRivers(area.lat, area.lon, radius),
+      fetchMajorRoads(area.lat, area.lon, radius * 0.6),
+      fetchBridges(area.lat, area.lon, radius),
+      fetchInfrastructure(area.lat, area.lon, radius * 0.5),
+      fetchRecentEarthquakes(area.lat, area.lon, 300),
+    ]).then(([rv, rd, br, inf, eq]) => {
+      if (!isCurrent) return
+      setOsmData({
+        rivers:      rv.status === 'fulfilled' ? (rv.value ?? []) : [],
+        roads:       rd.status === 'fulfilled' ? (rd.value ?? []) : [],
+        bridges:     br.status === 'fulfilled' ? (br.value ?? []) : [],
+        infra:       inf.status === 'fulfilled' ? (inf.value ?? []) : [],
+        earthquakes: eq.status === 'fulfilled' ? eq.value : null,
       })
-        .bindPopup(popupHTML(zone), { maxWidth: 280 })
-        .on('click', () => onSelect && onSelect(zone.habitation_id))
-        .addTo(map)
-
-      markersRef.current.push(circle)
+      if (rv.status === 'rejected' && rd.status === 'rejected') {
+        setOsmError('OSM Overpass unavailable — using local telemetry')
+      }
+    }).catch(err => {
+      console.warn('[HazardMap] OSM fetch error:', err)
+    }).finally(() => {
+      clearTimeout(safetyTimer)
+      if (isCurrent) setOsmLoading(false)
     })
 
-    if (!selectedId && zones.length > 0) {
-      try {
-        const validCoords = zones.filter(z => z.lat && z.lon).map(z => [z.lat, z.lon])
-        if (validCoords.length > 0) {
-          const bounds = Leaf.latLngBounds(validCoords)
-          map.fitBounds(bounds, { padding: [60, 60], maxZoom: 11 })
-        }
-      } catch (err) {}
+    return () => {
+      isCurrent = false
+      clearTimeout(safetyTimer)
     }
-  }, [mapInstance, zones, selectedId])
+  }, [area?.lat, area?.lon, area?.zoom])
 
-  // Update site markers (diamond icons)
+  // ── Render hazard layers when hazard or OSM data changes ─────────────────
+
   useEffect(() => {
-    const Leaf = getLeaflet()
-    const map = mapInstance || mapRef.current
-    if (!Leaf || !map) return
+    const map = mapRef.current
+    const L = leafletRef.current
+    if (!map || !L || !mapReady) return
 
-    siteMarksRef.current.forEach(m => m.remove())
-    siteMarksRef.current = []
+    // Remove old hazard group
+    if (hazardGroupRef.current) {
+      hazardGroupRef.current.remove()
+      hazardGroupRef.current = null
+    }
 
+    if (!activeHazard) {
+      setHazardResult({ legend: [], dataStatus: [] })
+      return
+    }
+
+    const layerData = {
+      rivers:      osmData.rivers,
+      roads:       osmData.roads,
+      bridges:     osmData.bridges,
+      infra:       osmData.infra,
+      earthquakes: osmData.earthquakes,
+      zones:       zones,
+      area:        area,
+    }
+
+    let result
+    switch (activeHazard) {
+      case 'flood':
+        result = createFloodLayers(L, layerData)
+        break
+      case 'erosion':
+        result = createErosionLayers(L, layerData)
+        break
+      case 'landslide':
+        result = createLandslideLayers(L, layerData)
+        break
+      case 'earthquake':
+        result = createEarthquakeLayers(L, layerData)
+        break
+      default:
+        setHazardResult({ legend: [], dataStatus: [] })
+        return
+    }
+
+    result.group.addTo(map)
+    hazardGroupRef.current = result.group
+    setHazardResult({ legend: result.legend, dataStatus: result.dataStatus })
+  }, [activeHazard, osmData, zones, area, mapReady])
+
+  // ── Settlement markers (always shown in overview, behind hazard layers) ───
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !_L) return
+
+    if (settlementGrpRef.current) { settlementGrpRef.current.remove() }
+
+    if (!activeLayers.settlements) {
+      settlementGrpRef.current = null
+      return
+    }
+
+    const grp = _L.layerGroup()
+    zones.forEach(zone => {
+      const c = CLF_COLOR[zone.classification] ?? CLF_COLOR.stable
+      const r = zone.population > 10000 ? 10 : zone.population > 3000 ? 8 : 6
+
+      _L.circleMarker([zone.lat, zone.lon], {
+        radius: r, color: '#ffffff', weight: 1.5,
+        fillColor: c.fill, fillOpacity: 0.9,
+      })
+        .bindPopup(settlementPopup(zone), { maxWidth: 260, className: 'rz-popup' })
+        .on('click', () => {
+          onZoneSelect?.(zone.habitation_id)
+          setSelectedFeature({ ...zone, featureType: 'habitation' })
+        })
+        .addTo(grp)
+    })
+    grp.addTo(map)
+    settlementGrpRef.current = grp
+  }, [zones, activeLayers.settlements, setSelectedFeature, onZoneSelect])
+
+  // ── Site markers ──────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !_L) return
+
+    if (siteGrpRef.current) { siteGrpRef.current.remove() }
+
+    if (!activeLayers.safe_sites) { siteGrpRef.current = null; return }
+
+    const grp = _L.layerGroup()
     sites.forEach(site => {
       if (!site.lat || !site.lon) return
-      const score = site.capacity_score || 0
-      const blue  = `hsl(${200 + score * 40},85%,${52 + score * 15}%)`
-      const icon  = Leaf.divIcon({
-        html: `<div style="width:12px;height:12px;background:${blue};border:2px solid rgba(255,255,255,0.8);transform:rotate(45deg);box-shadow:0 0 8px ${blue}"></div>`,
-        className: '',
-        iconSize: [12, 12],
-        iconAnchor: [6, 6],
+      const icon = _L.divIcon({
+        html: `<div style="width:14px;height:14px;border-radius:3px;background:#1d4ed8;border:2px solid #fff;box-shadow:0 0 8px rgba(59,130,246,.7)"></div>`,
+        iconSize: [14,14], iconAnchor: [7,7], className: '',
       })
-      const marker = Leaf.marker([site.lat, site.lon], { icon })
-        .bindPopup(sitePopupHTML(site), { maxWidth: 240 })
-        .addTo(map)
-      siteMarksRef.current.push(marker)
+      _L.marker([site.lat, site.lon], { icon })
+        .bindPopup(sitePopup(site), { maxWidth: 220, className: 'rz-popup' })
+        .on('click', () => setSelectedFeature({ ...site, featureType: 'safe_site' }))
+        .addTo(grp)
     })
-  }, [mapInstance, sites])
+    grp.addTo(map)
+    siteGrpRef.current = grp
+  }, [sites, activeLayers.safe_sites, setSelectedFeature])
 
-  // Pan to selected habitation
+  // ── Route ─────────────────────────────────────────────────────────────────
+
   useEffect(() => {
-    const map = mapInstance || mapRef.current
-    if (!map || !selectedId || !zones.length || route) return
-    const zone = zones.find(z => z.habitation_id === selectedId)
-    if (zone) map.panTo([zone.lat, zone.lon], { animate: true, duration: 0.8 })
-  }, [mapInstance, selectedId, zones, route])
+    const map = mapRef.current
+    if (!map || !_L) return
 
-  // Draw Route
-  useEffect(() => {
-    const Leaf = getLeaflet()
-    const map = mapInstance || mapRef.current
-    if (!Leaf || !map) return
+    if (routeGrpRef.current) { routeGrpRef.current.remove(); routeGrpRef.current = null }
 
-    if (routeLineRef.current) {
-      routeLineRef.current.remove()
-      routeLineRef.current = null
-    }
+    if (!route?.coordinates?.length || !activeLayers.routes) return
 
-    if (route && route.coordinates && route.coordinates.length > 0) {
-      routeLineRef.current = Leaf.polyline(route.coordinates, {
-        color: route.color || '#3b82f6',
-        weight: 4,
-        opacity: 0.8,
-        dashArray: '8, 8',
-        lineCap: 'round',
-      }).addTo(map)
+    const grp = _L.layerGroup()
+    _L.polyline(route.coordinates, { color: '#1d4ed8', weight: 8, opacity: 0.25 }).addTo(grp)
+    _L.polyline(route.coordinates, {
+      color: '#3b82f6', weight: 4, opacity: 0.9, lineCap: 'round', lineJoin: 'round',
+    }).addTo(grp)
+    grp.addTo(map)
+    routeGrpRef.current = grp
 
-      map.fitBounds(routeLineRef.current.getBounds(), { padding: [80, 80], maxZoom: 12 })
-    }
-  }, [mapInstance, route])
+    try { map.fitBounds(_L.polyline(route.coordinates).getBounds(), { padding: [60, 60] }) } catch {}
+  }, [route, activeLayers.routes])
+
+  // ── Handle hazard type switch ─────────────────────────────────────────────
+
+  const handleHazardSwitch = useCallback((id) => {
+    setActiveHazard(id)
+    setHazard(id ? { type: id } : null)
+  }, [setHazard])
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="relative flex-1 min-h-0 h-full w-full bg-[#090d16]" style={{ minHeight: '100%', height: '100%' }}>
+    <div className="relative flex-1 h-full w-full min-h-0 overflow-hidden" style={{ height: '100%' }}>
+
+      {/* Map container - Isolated stacking context ensures Leaflet internal panes (200-1000) stay inside z-0 */}
       <div
         ref={containerRef}
-        className="absolute inset-0 w-full h-full"
-        id="hazard-map"
-        style={{ width: '100%', height: '100%', zIndex: 1 }}
+        className="absolute inset-0 w-full h-full z-0"
+        id="redzone-map"
+        style={{ isolation: 'isolate' }}
       />
 
-      {/* Live Situation HUD */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] hidden md:flex items-center gap-4 px-6 py-2.5 rounded-full border border-white/[0.08] bg-slate-950/85 backdrop-blur-xl shadow-[0_4px_24px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.06)]">
-        <div className="flex items-center gap-2 border-r border-white/10 pr-4">
-          <span className="text-[10px] font-bold text-slate-400 font-mono uppercase tracking-wider">River Level</span>
-          <span className="text-xs font-bold text-red-400">↑ +1.8m</span>
-        </div>
-        <div className="flex items-center gap-2 border-r border-white/10 pr-4">
-          <span className="text-[10px] font-bold text-slate-400 font-mono uppercase tracking-wider">Rainfall</span>
-          <span className="text-xs font-bold text-blue-400">142 mm / 24h</span>
-        </div>
-        <div className="flex items-center gap-2 border-r border-white/10 pr-4">
-          <span className="text-[10px] font-bold text-slate-400 font-mono uppercase tracking-wider">Erosion</span>
-          <span className="text-xs font-bold text-orange-400">HIGH</span>
-        </div>
-        <div className="flex items-center gap-2 border-r border-white/10 pr-4">
-          <span className="text-[10px] font-bold text-slate-400 font-mono uppercase tracking-wider">Road Access</span>
-          <span className="text-xs font-bold text-emerald-400">82%</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-bold text-slate-400 font-mono uppercase tracking-wider">Confidence</span>
-          <span className="text-xs font-bold text-slate-200">91%</span>
-        </div>
-      </div>
+      {/* Map Inspector panel overlay - z-30, guaranteed above map */}
+      <MapInspectorPanel />
 
-      {/* Layer Switcher & Map Controls */}
-      <div className="absolute top-4 left-4 z-[500] flex flex-col gap-2">
-        <div className="flex flex-col p-1.5 rounded-xl bg-slate-950/85 border border-white/[0.08] backdrop-blur-xl shadow-[0_4px_16px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] w-36">
-          {['RISK', 'FLOOD DEPTH', 'EROSION', 'POPULATION', 'ROADS'].map(layer => (
-            <button
-              key={layer}
-              onClick={() => setActiveLayer(layer)}
-              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-left transition-all ${
-                activeLayer === layer
-                  ? 'bg-blue-600/20 text-blue-400'
-                  : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200'
-              }`}
-            >
-              {layer}
-            </button>
-          ))}
-        </div>
-
-        {/* Basemap Toggle */}
-        <div className="flex flex-col p-1.5 rounded-xl bg-slate-950/85 border border-white/[0.08] backdrop-blur-xl shadow-lg w-36">
+      {/* ── Hazard type switcher bar ── */}
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex gap-1 bg-[#0c101d] border border-white/[0.12] rounded-xl px-2 py-1.5 shadow-2xl">
+        {HAZARD_TYPES.map(ht => (
           <button
-            onClick={() => toggleMapMode('dark')}
-            className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-left transition-all ${
-              mapMode === 'dark'
-                ? 'bg-blue-600/20 text-blue-400'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
+            key={String(ht.id)}
+            onClick={() => handleHazardSwitch(ht.id)}
+            disabled={!area && ht.id !== null}
+            className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider font-mono transition-all disabled:opacity-30 ${
+              activeHazard === ht.id
+                ? `bg-white/[0.12] border border-white/[0.2] ${ht.color}`
+                : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            Tactical Dark
+            {ht.label}
           </button>
-          <button
-            onClick={() => toggleMapMode('satellite')}
-            className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-left transition-all ${
-              mapMode === 'satellite'
-                ? 'bg-blue-600/20 text-blue-400'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
-            }`}
-          >
-            Satellite
-          </button>
-        </div>
+        ))}
       </div>
 
-      {/* Liquid Glass Risk Legend */}
-      <div className="absolute bottom-6 left-5 z-[500] p-3.5 rounded-xl border border-white/[0.08] bg-slate-950/85 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.06)] min-w-[160px]">
-        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2.5 font-mono">
-          Flood & Erosion Severity
+      {/* OSM loading indicator */}
+      {osmLoading && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0c101d] border border-blue-500/30 shadow-2xl">
+          <div className="w-3 h-3 border border-blue-500/40 border-t-blue-400 rounded-full animate-spin" />
+          <span className="text-[9px] font-mono text-blue-400 uppercase tracking-widest">Fetching OSM geographic data...</span>
         </div>
-        <div className="space-y-1.5">
-          {Object.entries(RISK_COLORS).map(([cls, color]) => (
-            <div key={cls} className="flex items-center gap-2">
-              <div
-                className="w-2.5 h-2.5 rounded-full"
-                style={{
-                  backgroundColor: color,
-                  boxShadow: cls === 'immediate' ? `0 0 6px ${color}` : 'none',
-                }}
-              />
-              <span className="text-xs font-medium text-slate-300 capitalize">
-                {cls.replace('_', ' ')}
-              </span>
+      )}
+
+      {/* OSM error notice */}
+      {osmError && !osmLoading && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-lg bg-[#0c101d] border border-amber-500/30 shadow-2xl">
+          <span className="text-[9px] font-mono text-amber-400">{osmError}</span>
+        </div>
+      )}
+
+      {/* Dynamic hazard legend + data status */}
+      <HazardLegend
+        legend={hazardResult.legend}
+        dataStatus={hazardResult.dataStatus}
+        hazardType={activeHazard}
+        loading={osmLoading}
+      />
+
+      {/* Overview legend (no hazard selected) */}
+      {!activeHazard && zones.length > 0 && (
+        <div className="absolute bottom-8 right-4 z-20 bg-[#0c101d] border border-white/[0.12] rounded-xl p-3 shadow-2xl">
+          <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mb-2 font-mono">ZONE CLASSIFICATION</div>
+          {[
+            { key: 'immediate',   label: 'IMMEDIATE'   },
+            { key: 'short_term',  label: 'SHORT TERM'  },
+            { key: 'medium_term', label: 'MEDIUM TERM' },
+            { key: 'stable',      label: 'STABLE'      },
+          ].map(({ key, label }) => (
+            <div key={key} className="flex items-center gap-2 mb-1">
+              <div className="w-3 h-3 rounded-full" style={{ background: CLF_COLOR[key].fill, border: '1px solid #ffffff50' }} />
+              <span className="text-[10px] text-slate-300 font-mono">{label}</span>
+              <span className="text-[7px] font-mono text-slate-500 ml-auto">MODELLED</span>
             </div>
           ))}
+          {sites.length > 0 && (
+            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-white/[0.08]">
+              <div className="w-3 h-3 rounded-sm" style={{ background: '#1d4ed8', border: '2px solid #fff' }} />
+              <span className="text-[10px] text-slate-300 font-mono">SAFE SITE</span>
+            </div>
+          )}
         </div>
-        <div className="mt-3 pt-2.5 border-t border-white/[0.08] flex items-center gap-2">
-          <div className="w-2.5 h-2.5 bg-blue-500 rotate-45 shadow-[0_0_6px_rgba(59,130,246,0.6)]" />
-          <span className="text-xs font-medium text-slate-300">High-Ground Safe Parcel</span>
+      )}
+
+      {/* No area hint */}
+      {!area && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+          <div className="text-center">
+            <div className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">INDIA — OVERVIEW</div>
+            <div className="text-[11px] text-slate-600 font-mono">Search for an area — then select a hazard type above</div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

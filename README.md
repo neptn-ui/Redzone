@@ -1,5 +1,7 @@
 # REDZONE: Assam Flood & Erosion Relocation Engine
 
+![REDZONE Platform Screenshot](./screenshot.png)
+
 **REDZONE** is a highly specialized, decision-support platform built for disaster-management authorities (such as ASDMA and NDRF). It acts as a comprehensive Risk-Aware Relocation Engine specifically tailored for the highly vulnerable districts of Assam: **Majuli, Dhemaji, and Cachar**.
 
 The core value proposition of REDZONE is simple but powerful:

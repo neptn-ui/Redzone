@@ -1,8 +1,18 @@
 // src/components/DecisionPanel.jsx
-import { useState } from 'react'
+// ============================================================================
+// CHANGES:
+// - Replaced hardcoded breakdown bars (31, 24, 18...) with real explanation_json
+// - Replaced fake audit trail with real computed_at timestamps
+// - Replaced fake "91% confidence" with actual data health info
+// - Replaced fake "Model v1.4" with truthful model info
+// - "Evidence" section now derived from actual data signals
+// ============================================================================
+
+import { useState, useEffect, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import { useZoneDetail } from '../hooks/useZones'
+import { api } from '../api/client'
 import { ShieldAlertIcon, CloseIcon, LocationIcon, RefreshIcon } from './Icons'
 
 function TrajectoryChart() {
@@ -34,17 +44,23 @@ function TrajectoryChart() {
   )
 }
 
-function BreakdownBar({ label, value }) {
+function BreakdownBar({ label, value, weight }) {
+  const displayValue = typeof value === 'number' ? (value * 100).toFixed(0) : '—'
+  const barWidth = typeof value === 'number' ? Math.min(100, value * 100) : 0
+  const weightLabel = weight ? `w=${weight}` : ''
   return (
     <div className="mb-2">
       <div className="flex justify-between items-center text-[11px] mb-1">
         <span className="text-slate-300 font-medium">{label}</span>
-        <span className="font-mono text-slate-200">{value}</span>
+        <div className="flex items-center gap-2">
+          {weight && <span className="text-[9px] font-mono text-slate-600">{weightLabel}</span>}
+          <span className="font-mono text-slate-200">{displayValue}%</span>
+        </div>
       </div>
       <div className="w-full h-1.5 rounded-full bg-white/[0.04] overflow-hidden p-[0.5px]">
         <div
-          className="h-full rounded-full bg-blue-500 shadow-[0_0_6px_rgba(59,130,246,0.5)]"
-          style={{ width: `${Math.min(100, value)}%` }}
+          className="h-full rounded-full bg-blue-500 shadow-[0_0_6px_rgba(59,130,246,0.5)] transition-all duration-500"
+          style={{ width: `${barWidth}%` }}
         />
       </div>
     </div>
@@ -53,7 +69,16 @@ function BreakdownBar({ label, value }) {
 
 export default function DecisionPanel({ habitationId, onClose }) {
   const { data, loading, error } = useZoneDetail(habitationId)
+  const [explanation, setExplanation] = useState(null)
   const navigate = useNavigate()
+
+  // Load explanation data from real backend
+  useEffect(() => {
+    if (!habitationId) { setExplanation(null); return }
+    api.zoneExplain(habitationId)
+      .then(d => setExplanation(d))
+      .catch(() => setExplanation(null))
+  }, [habitationId])
 
   if (!habitationId) {
     return (
@@ -82,7 +107,51 @@ export default function DecisionPanel({ habitationId, onClose }) {
   if (error || !data) return null
 
   const isCritical = data.classification === 'immediate' || data.classification === 'short_term'
-  
+
+  // Extract real breakdown components from explanation
+  const hazardComps = explanation?.hazard?.components || {}
+  const liveSignals = explanation?.live_signals || {}
+  const computedAt = explanation?.computed_at || data.computed_at
+
+  // Build evidence list from real signals
+  const evidence = []
+  if (liveSignals.rainfall_mm_per_hr > 15) {
+    evidence.push({ color: 'text-red-400', text: `Heavy rainfall: ${liveSignals.rainfall_mm_per_hr?.toFixed(1)} mm/hr` })
+  } else if (liveSignals.rainfall_mm_per_hr > 0) {
+    evidence.push({ color: 'text-blue-400', text: `Rainfall: ${liveSignals.rainfall_mm_per_hr?.toFixed(1)} mm/hr` })
+  }
+  if (liveSignals.seismic_magnitude > 4) {
+    evidence.push({ color: 'text-red-400', text: `Seismic event: M${liveSignals.seismic_magnitude?.toFixed(1)}` })
+  } else if (liveSignals.seismic_magnitude > 0) {
+    evidence.push({ color: 'text-amber-400', text: `Seismic baseline: M${liveSignals.seismic_magnitude?.toFixed(1)}` })
+  }
+  if (liveSignals.trigger_multiplier > 1.0) {
+    evidence.push({ color: 'text-orange-400', text: `Live trigger multiplier: ×${liveSignals.trigger_multiplier?.toFixed(2)}` })
+  }
+  if (hazardComps.sar_deformation?.normalized > 0.5) {
+    evidence.push({ color: 'text-amber-400', text: 'Ground deformation detected via SAR' })
+  }
+  if (hazardComps.ndvi_change?.normalized > 0.3) {
+    evidence.push({ color: 'text-amber-400', text: 'Vegetation loss detected via satellite' })
+  }
+  if (data.hazard_score > 0.75) {
+    evidence.push({ color: 'text-red-400', text: 'Score exceeds critical threshold (75)' })
+  }
+  if (evidence.length === 0) {
+    evidence.push({ color: 'text-blue-400', text: 'No active alerts at this time' })
+  }
+
+  // Compute data health percentage
+  const signalsAvailable = [
+    liveSignals.rainfall_mm_per_hr != null,
+    liveSignals.seismic_magnitude != null,
+  ].filter(Boolean).length
+  const dataHealth = Math.round((signalsAvailable / 2) * 100)
+
+  const timeStr = computedAt
+    ? new Date(computedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })
+    : '—'
+
   return (
     <motion.aside
       id="decision-panel"
@@ -134,34 +203,52 @@ export default function DecisionPanel({ habitationId, onClose }) {
           <TrajectoryChart />
         </div>
 
-        {/* Explainable Breakdown */}
+        {/* Explainable Breakdown — NOW FROM REAL DATA */}
         <div className="p-6">
           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-4 font-mono">Why is this high?</div>
           <div className="space-y-3">
-            <BreakdownBar label="Flood probability" value={31} />
-            <BreakdownBar label="Riverbank erosion" value={24} />
-            <BreakdownBar label="Population exposure" value={18} />
-            <BreakdownBar label="Road accessibility" value={8} />
-            <BreakdownBar label="Historical exposure" value={6} />
+            <BreakdownBar
+              label="Hazard intensity"
+              value={hazardComps.hazard_intensity?.normalized}
+              weight={0.30}
+            />
+            <BreakdownBar
+              label="Frequency / history"
+              value={hazardComps.frequency_history?.normalized}
+              weight={0.20}
+            />
+            <BreakdownBar
+              label="Terrain vulnerability"
+              value={hazardComps.terrain_vulnerability?.normalized}
+              weight={0.15}
+            />
+            <BreakdownBar
+              label="Proximity to hazard"
+              value={hazardComps.proximity?.normalized}
+              weight={0.15}
+            />
+            <BreakdownBar
+              label="SAR deformation"
+              value={hazardComps.sar_deformation?.normalized}
+              weight={0.10}
+            />
+            <BreakdownBar
+              label="NDVI vegetation change"
+              value={hazardComps.ndvi_change?.normalized}
+              weight={0.10}
+            />
           </div>
         </div>
 
-        {/* Evidence */}
+        {/* Evidence — NOW FROM REAL SIGNALS */}
         <div className="p-6 bg-slate-900/20">
           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3 font-mono">Evidence</div>
           <ul className="space-y-2 text-xs text-slate-300 font-medium">
-            <li className="flex items-start gap-2">
-              <span className="text-red-400 mt-0.5">•</span> River level rising rapidly
-            </li>
-            <li className="flex items-start gap-2">
-              <span className="text-orange-400 mt-0.5">•</span> Active erosion front detected
-            </li>
-            <li className="flex items-start gap-2">
-              <span className="text-amber-400 mt-0.5">•</span> High population exposure
-            </li>
-            <li className="flex items-start gap-2">
-              <span className="text-blue-400 mt-0.5">•</span> Primary access road vulnerable
-            </li>
+            {evidence.map((ev, i) => (
+              <li key={i} className="flex items-start gap-2">
+                <span className={`${ev.color} mt-0.5`}>•</span> {ev.text}
+              </li>
+            ))}
           </ul>
         </div>
 
@@ -173,7 +260,7 @@ export default function DecisionPanel({ habitationId, onClose }) {
             <div className="mb-5 flex items-center gap-3 p-3.5 rounded-xl border border-red-500/40 bg-red-500/10 shadow-[0_0_20px_rgba(239,68,68,0.15)]">
               <ShieldAlertIcon size={24} className="text-red-400 shrink-0 animate-pulse" />
               <div className="text-sm font-extrabold tracking-tight text-white uppercase">
-                🚨 Relocate Within 12 Hours
+                Relocate Within 12 Hours
               </div>
             </div>
           ) : (
@@ -193,8 +280,10 @@ export default function DecisionPanel({ habitationId, onClose }) {
               </div>
             </div>
             <div className="p-2 rounded-lg bg-white/[0.03] border border-white/[0.04]">
-              <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Confidence</div>
-              <div className="text-sm font-bold mt-0.5 text-blue-400">91%</div>
+              <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest font-mono">Data Health</div>
+              <div className={`text-sm font-bold mt-0.5 ${dataHealth >= 80 ? 'text-emerald-400' : dataHealth >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
+                {dataHealth}%
+              </div>
             </div>
           </div>
 
@@ -214,26 +303,26 @@ export default function DecisionPanel({ habitationId, onClose }) {
           </div>
         </div>
 
-        {/* Explainable AI & Audit Trail */}
+        {/* Explainable AI & Audit Trail — NOW FROM REAL DATA */}
         <div className="p-6 bg-slate-900/50">
           <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-4 font-mono">AI-Assisted Prioritization</div>
           
           <div className="text-xs text-slate-400 leading-relaxed mb-5">
-            Risk score is calculated from flood probability, river proximity, elevation, erosion trend, population density, road accessibility, and historical flood exposure.
+            Risk score is computed from hazard intensity, frequency/history, terrain vulnerability, proximity, SAR deformation, and NDVI change using the REDZONE Hazard Engine with §5 expert-calibrated weights.
           </div>
 
           <div className="flex items-center gap-4 text-[10px] font-mono text-slate-500 mb-6 border-b border-white/[0.04] pb-5">
-            <div>Model: <strong className="text-slate-300">REDZONE Risk Model v1.4</strong></div>
-            <div>Updated: <strong className="text-slate-300">22:41</strong></div>
+            <div>Model: <strong className="text-slate-300">REDZONE Hazard Engine v2.1</strong></div>
+            <div>Updated: <strong className="text-slate-300">{timeStr}</strong></div>
           </div>
 
-          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3 font-mono">Decision Audit Trail</div>
+          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3 font-mono">Scoring Timeline</div>
           <div className="space-y-3 relative before:absolute before:inset-y-1 before:left-1.5 before:w-px before:bg-white/10">
             {[
-              { time: '22:41', text: 'Risk model updated' },
-              { time: '22:42', text: 'Betkuchandi priority increased' },
-              { time: '22:43', text: 'B-17 selected as optimal site' },
-              { time: '22:44', text: 'Primary route validated' }
+              { time: timeStr, text: `Hazard score computed: ${(data.hazard_score * 100).toFixed(0)}/100` },
+              { time: timeStr, text: `Classification: ${data.classification?.replace('_', ' ')}` },
+              ...(data.matched_site ? [{ time: timeStr, text: `Matched to: ${data.matched_site}` }] : []),
+              ...(liveSignals.trigger_multiplier > 1 ? [{ time: timeStr, text: `Live trigger active: ×${liveSignals.trigger_multiplier?.toFixed(2)}` }] : []),
             ].map((event, i) => (
               <div key={i} className="flex items-start gap-3 relative z-10">
                 <div className="w-3 h-3 rounded-full bg-slate-900 border-2 border-blue-500 mt-0.5 shrink-0" />
@@ -243,6 +332,17 @@ export default function DecisionPanel({ habitationId, onClose }) {
                 </div>
               </div>
             ))}
+          </div>
+
+          {/* Data provenance note */}
+          <div className="mt-5 p-2 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+            <div className="text-[9px] font-bold text-amber-400/80 uppercase tracking-wider mb-1">DATA NOTE</div>
+            <div className="text-[10px] text-slate-500 leading-relaxed">
+              {data.data_is_cached
+                ? 'Data source: CACHED — live signals were unavailable at compute time.'
+                : 'Data source: REAL + SYNTH — live weather/seismic feeds active. Terrain/history data is synthetic calibration.'
+              }
+            </div>
           </div>
         </div>
       </div>

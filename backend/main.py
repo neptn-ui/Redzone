@@ -52,13 +52,13 @@ async def lifespan(app: FastAPI):
 
 # ---------- App ---------------------------------------------------------
 app = FastAPI(
-    title="SIH26191 · Risk-Aware Relocation Platform",
+    title="REDZONE — Geographic Disaster Intelligence Platform",
     description=(
-        "Preventive flood and riverbank erosion relocation decision engine for Assam "
-        "(Majuli, Dhemaji, Cachar). Transparent weighted scoring, optimized habitation-to-site matching, "
-        "and live satellite / weather integration."
+        "Location-agnostic disaster decision-support and relocation engine. "
+        "Hazard scoring, safe-site matching, OSRM routing, and human-in-the-loop "
+        "deployment planning."
     ),
-    version="0.2.0",
+    version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -141,3 +141,15 @@ try:
     app.include_router(report_router, prefix="/api")
 except ImportError:
     log.warning("api/report.py not yet present")
+
+try:
+    from api.areas import router as areas_router
+    app.include_router(areas_router, prefix="/api")
+except ImportError:
+    log.warning("api/areas.py not yet present")
+
+try:
+    from api.events import router as events_router
+    app.include_router(events_router, prefix="/api")
+except ImportError:
+    log.warning("api/events.py not yet present")
