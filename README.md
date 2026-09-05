@@ -1,6 +1,6 @@
 # REDZONE: Autonomous Disaster Relocation & Risk-Aware Evacuation Platform
 
-![REDZONE Platform Screenshot](./screenshot.png)
+![REDZONE Seismic Intelligence](./docs/screenshots/seismic_intelligence.png)
 
 **REDZONE** is an enterprise decision-support and relocation engine engineered for disaster-management authorities (such as ASDMA, NDRF, and SDMAs). Moving beyond traditional reactive hazard monitoring, REDZONE implements an autonomous operational loop:
 
