@@ -11,7 +11,10 @@
 //   - Area filtering: pass { lat, lon, radius_km } to scope queries geographically.
 // ============================================================================
 
-const BASE = '/api'
+const API_ORIGIN = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL)
+  ? import.meta.env.VITE_API_URL.replace(/\/+$/, '')
+  : ''
+const BASE = `${API_ORIGIN}/api`
 
 async function request(path, options = {}) {
   const controller = new AbortController()
