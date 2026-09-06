@@ -19,14 +19,14 @@ import { api } from '../api/client'
 
 function DataLabel({ status, className = '' }) {
   const styles = {
-    OBSERVED:      'text-emerald-400 border-emerald-500/30 bg-emerald-500/5',
-    DERIVED:       'text-blue-400    border-blue-500/30    bg-blue-500/5',
-    MODELLED:      'text-blue-400    border-blue-500/30    bg-blue-500/5',
-    SIMULATED:     'text-blue-300    border-blue-400/20    bg-blue-400/5',
-    HISTORICAL:    'text-amber-400   border-amber-500/30   bg-amber-500/5',
+    OBSERVED: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5',
+    DERIVED: 'text-blue-400    border-blue-500/30    bg-blue-500/5',
+    MODELLED: 'text-blue-400    border-blue-500/30    bg-blue-500/5',
+    SIMULATED: 'text-blue-300    border-blue-400/20    bg-blue-400/5',
+    HISTORICAL: 'text-amber-400   border-amber-500/30   bg-amber-500/5',
     RECONSTRUCTED: 'text-amber-300   border-amber-400/20   bg-amber-400/5',
-    STATIC:        'text-slate-400   border-slate-600/40   bg-slate-800',
-    UNAVAILABLE:   'text-red-400     border-red-500/30     bg-red-500/5',
+    STATIC: 'text-slate-400   border-slate-600/40   bg-slate-800',
+    UNAVAILABLE: 'text-red-400     border-red-500/30     bg-red-500/5',
     PLANNING_ASSUMPTION: 'text-amber-400 border-amber-500/20 bg-amber-500/5',
   }
   return (
@@ -116,7 +116,7 @@ function DecisionAudit({ decisionState, currentPlan, planStatus }) {
 function BackendReport({ report, loading, error }) {
   if (loading) return (
     <div className="space-y-3">
-      {[1,2,3].map(i => <div key={i} className="h-8 rounded shimmer bg-white/[0.04]" />)}
+      {[1, 2, 3].map(i => <div key={i} className="h-8 rounded shimmer bg-white/[0.04]" />)}
     </div>
   )
   if (error) return (
@@ -128,7 +128,7 @@ function BackendReport({ report, loading, error }) {
 
   const meta = report.report_metadata ?? {}
   const zones = report.priority_queue ?? []
-  const recs  = report.recommendations ?? []
+  const recs = report.recommendations ?? []
 
   return (
     <div className="space-y-4">
@@ -200,10 +200,10 @@ function ProvenanceTable() {
 
 export default function Reports() {
   const { area, mode, modeMeta, decisionState, currentPlan, planStatus } = useAppStore()
-  const [report,  setReport]  = useState(null)
+  const [report, setReport] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [error,   setError]   = useState(null)
-  const [tab,     setTab]     = useState('situation') // 'situation' | 'audit' | 'provenance'
+  const [error, setError] = useState(null)
+  const [tab, setTab] = useState('situation') // 'situation' | 'audit' | 'provenance'
 
   const loadReport = () => {
     setLoading(true)
@@ -256,17 +256,16 @@ export default function Reports() {
           <div className="flex gap-1 mb-6 border-b border-white/[0.06] pb-0">
             {[
               { id: 'situation', label: 'Situation' },
-              { id: 'audit',     label: 'Decision Audit' },
-              { id: 'provenance',label: 'Data Provenance' },
+              { id: 'audit', label: 'Decision Audit' },
+              { id: 'provenance', label: 'Data Provenance' },
             ].map(t => (
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
-                className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 -mb-px ${
-                  tab === t.id
+                className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 -mb-px ${tab === t.id
                     ? 'text-blue-400 border-blue-500'
                     : 'text-slate-600 border-transparent hover:text-slate-400'
-                }`}
+                  }`}
               >
                 {t.label}
               </button>

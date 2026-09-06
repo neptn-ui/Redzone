@@ -1,10 +1,12 @@
-# REDZONE: Autonomous Disaster Relocation & Risk-Aware Evacuation Platform
+# REDZONE: General-Purpose Multi-Hazard Relocation Decision Engine
 
 ![REDZONE Seismic Intelligence](./docs/screenshots/seismic_intelligence.png)
 
-**REDZONE** is an enterprise decision-support and relocation engine engineered for disaster-management authorities (such as ASDMA, NDRF, and SDMAs). Moving beyond traditional reactive hazard monitoring, REDZONE implements an autonomous operational loop:
+**REDZONE** is a **region-agnostic**, enterprise decision-support and relocation engine for disaster-management authorities (NDRF, SDMA, DDMA). It ingests any geography via a `regions` table and runs identical multi-hazard scoring everywhere — no region-specific code.
 
 > *"Existing systems display where disasters are occurring. REDZONE answers the operational imperatives: **WHO** is at risk, **WHY** they are endangered, **WHERE** they can safely relocate, and **HOW** evacuation and resource allocation must be executed."*
+
+**Pilot regions loaded:** Assam Multi-District (Majuli, Dhemaji, Cachar — flood + erosion) and Chamoli, Uttarakhand (landslide + subsidence). Adding a new region requires only a seed script — no core code changes.
 
 ---
 
@@ -14,13 +16,13 @@ REDZONE transitions disaster operations into structured, explainable execution:
 
 $$\text{DETECT} \longrightarrow \text{ASSESS} \longrightarrow \text{PRIORITIZE} \longrightarrow \text{MATCH} \longrightarrow \text{ROUTE} \longrightarrow \text{RELOCATE} \longrightarrow \text{AUDIT}$$
 
-1. **DETECT**: Ingests real-time geographic telemetry (OpenStreetMap waterways, transport networks, critical infrastructure, and USGS global seismic catalogs).
-2. **ASSESS**: Computes multi-factor hazard scores with verifiable provenance tags (`REAL`, `MODELLED`, `RECONSTRUCTED`, `UNAVAILABLE`).
-3. **PRIORITIZE**: Classifies exposed habitations into an actionable triage queue (`IMMEDIATE`, `SHORT_TERM`, `MED_TERM`, `STABLE`).
-4. **MATCH**: Allocates displaced populations to verified Safe Sites using National Building Code (NBC 2016) shelter spatial standards (min. 9.5 m²/person).
-5. **ROUTE**: Evaluates primary and alternate evacuation corridors via road networks (OSRM integration) with hazard avoidance.
-6. **RELOCATE**: Generates field-ready Operational Manifests specifying NDRF personnel, transport logistics, and medical resource needs.
-7. **AUDIT**: Provides complete mathematical Explainable AI (XAI) audit trails for every prioritization and capacity decision.
+1. **DETECT**: Ingests real-time geographic telemetry (OpenStreetMap waterways, USGS seismic catalogs, OWM rainfall) per active region — auto-polling starts when a region is added to the DB.
+2. **ASSESS**: Computes multi-factor hazard scores + **seasonal risk multiplier** (Gaussian peak-month weighting from DisasterHistory) with verifiable provenance tags (`REAL`, `SYNTH`, `MISSING`).
+3. **PRIORITIZE**: Classifies exposed habitations into four **RelocationHorizon** buckets (`IMMEDIATE`, `SHORT_TERM`, `MEDIUM_TERM`, `MONITOR`) using hazard score + **vulnerability index** (elderly %, literacy, housing type, household size, BPL fraction). `IMMEDIATE` is never silently downgraded for lack of a matched site.
+4. **MATCH**: Allocates displaced populations to verified Safe Sites using NBC 2016 shelter standards (min. 9.5 m²/person), deducting `committed_population` from available capacity. `hazard_free=False` sites are excluded.
+5. **ROUTE**: Evaluates evacuation corridors via OSRM road network integration.
+6. **RELOCATE**: Generates field-ready **Deployment Manifests** (POST `/api/manifest`) with NDRF team / truck / medical unit counts, auto-scaled by vulnerability index.
+7. **AUDIT**: Every score carries a structured `explanation_json` (§6 audit trail) with terrain source, signal status, seasonal multiplier, vulnerability breakdown, and horizon rationale.
 
 ---
 
@@ -53,10 +55,28 @@ REDZONE features a dedicated GIS layer stack tailored to four primary disaster m
 ## 🧠 Algorithmic Scoring & Explainable AI (XAI)
 
 ### 1. Habitation Urgency Index
-$$\text{Urgency Score} = w_h \cdot H_{\text{norm}} + w_p \cdot P_{\text{norm}} + w_i \cdot (1 - I_{\text{access}}) + w_v \cdot V_{\text{vuln}}$$
-- **Hazard Exposure ($H_{\text{norm}}$)**: Distance to hazard front and modelled intensity.
-- **Demographic Vulnerability ($P_{\text{norm}}, V_{\text{vuln}}$)**: Population density, children, elderly, and infirm ratios.
-- **Infrastructure Isolation ($I_{\text{access}}$)**: Distance to arterial roads and bridges.
+$$\text{Urgency Score} = H_{\text{score}} \times P_{\text{exposure\_norm}} \times F_{\text{site}}$$
+- **Hazard Score** ($H_{\text{score}}$): Weighted composite of intensity, history, terrain, proximity, SAR deformation, NDVI change × live trigger multiplier.
+- **Seasonal Risk Multiplier** (§2.5): Gaussian peak-month weighting from DisasterHistory event_date distribution; range 1.0–2.0.
+- **Population Exposure Norm** ($P_{\text{exposure\_norm}}$): Fraction of reference population (5,000) exposed; floor applied when habitation is fully within hazard zone.
+- **Site Availability Factor** ($F_{\text{site}}$): 1.0 if a viable site exists within radius; 0.6 otherwise (still visible, not hidden).
+
+### 2. Social Vulnerability Index (§2.1)
+$$V = 0.25 \cdot e_{\text{elderly}} + 0.20 \cdot (1-l_{\text{literacy}}) + 0.25 \cdot h_{\text{kutcha}} + 0.15 \cdot hh_{\text{size}} + 0.15 \cdot b_{\text{bpl}}$$
+Proxies from Census 2011 / SECC 2011. Surfaced with vintage warning in every API response.
+High vulnerability ($V \ge 0.75$) at MEDIUM_TERM hazard elevates horizon to SHORT_TERM.
+
+### 3. Relocation Horizon Classification (§2.2)
+| Threshold | Horizon | Authority Action |
+|---|---|---|
+| $H \ge 0.75$ | `IMMEDIATE` | NDRF deployment ≤ 24h; never silently downgraded |
+| $H \in [0.55, 0.75)$ | `SHORT_TERM` | Infrastructure prep + community consent (weeks–1 yr) |
+| $H \in [0.35, 0.55)$ | `MEDIUM_TERM` | Formal DPR + seasonal re-assessment (1–3 yr) |
+| $H < 0.35$ | `MONITOR` | Sensor + satellite observation only |
+
+### 4. Deployment Manifest (§2.7)
+POST `/api/manifest` → returns NDRF/SDRF team count, trucks, medical units scaled by population + vulnerability.  
+GET `/api/manifest/{id}/pdf` → PDF via fpdf2 for briefings.
 
 ### 2. Safe Site Capacity Index (NBC 2016 Compliant)
 $$\text{Capacity Score} = 0.30 \cdot L_{\text{avail}} + 0.25 \cdot S_{\text{safety}} + 0.20 \cdot I_{\text{prox}} + 0.15 \cdot W_{\text{access}} + 0.10 \cdot (1 - \text{Load Ratio})$$

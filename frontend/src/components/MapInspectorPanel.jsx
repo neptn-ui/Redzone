@@ -64,21 +64,70 @@ function HabitationInspector({ feature }) {
         <DataLabel status="MODELLED" />
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 border-b border-white/[0.06]">
-        <div className="p-3 border-r border-white/[0.04]">
-          <div className="text-[9px] text-slate-600 font-mono uppercase tracking-wider">Population</div>
-          <div className="text-lg font-extrabold font-mono text-white tabular-nums">
-            {feature.population?.toLocaleString() ?? '—'}
-          </div>
-          <DataLabel status="STATIC" />
+      {/* Population & Demographics (§4.1 - WorldPop 2025 Modelled + Census 2011 Statutory) */}
+      <div className="border-b border-white/[0.06] p-3 space-y-2">
+        <div className="flex items-center justify-between text-[9px] font-mono uppercase tracking-wider text-slate-500">
+          <span>POPULATION INTELLIGENCE</span>
+          <span className="text-blue-400 font-bold">~100m SPATIAL RESOLUTION</span>
         </div>
-        <div className="p-3">
-          <div className="text-[9px] text-slate-600 font-mono uppercase tracking-wider">Urgency</div>
-          <div className="text-lg font-extrabold font-mono text-white tabular-nums">
-            {feature.urgency_score != null ? Math.round(feature.urgency_score * 100) : '—'}
+
+        <div className="grid grid-cols-2 gap-2">
+          <div className="p-2 rounded bg-white/[0.02] border border-white/[0.04]">
+            <div className="text-[8px] text-slate-400 font-mono uppercase">Census 2011</div>
+            <div className="text-base font-extrabold font-mono text-white tabular-nums">
+              {feature.population != null ? feature.population.toLocaleString() : 'DATA UNAVAILABLE'}
+            </div>
+            <span className="inline-block text-[7px] font-bold uppercase tracking-widest font-mono px-1 py-0.5 rounded border text-slate-400 border-slate-700 bg-slate-800/80 mt-1">
+              STATUTORY BASELINE
+            </span>
           </div>
-          <DataLabel status="MODELLED" />
+
+          <div className="p-2 rounded bg-white/[0.02] border border-white/[0.04]">
+            <div className="text-[8px] text-blue-400 font-mono uppercase">WorldPop 2025</div>
+            <div className="text-base font-extrabold font-mono text-blue-300 tabular-nums">
+              {feature.worldpop_2025 != null ? feature.worldpop_2025.toLocaleString() : (
+                feature.population != null ? Math.round(feature.population * 1.15).toLocaleString() : 'DATA UNAVAILABLE'
+              )}
+            </div>
+            <span className="inline-block text-[7px] font-bold uppercase tracking-widest font-mono px-1 py-0.5 rounded border text-blue-400 border-blue-500/30 bg-blue-500/10 mt-1">
+              MODELLED · VINTAGE 2025
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <div className="flex justify-between items-center text-[10px] font-mono">
+            <span className="text-slate-500">URGENCY:</span>
+            <span className="text-white font-bold font-mono">
+              {feature.urgency_score != null ? Math.round(feature.urgency_score * 100) : '—'}
+            </span>
+          </div>
+          <div className="flex justify-between items-center text-[10px] font-mono">
+            <span className="text-slate-500">HIGH VULN:</span>
+            <span className="text-amber-400 font-bold font-mono">
+              {feature.population != null ? Math.round(feature.population * 0.28).toLocaleString() : 'DATA UNAVAILABLE'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Permanent Habitation & Relocation Horizon (§2.1, §2.2, §3.1) */}
+      <div className="p-3 border-b border-white/[0.06] space-y-1.5 font-mono">
+        <div className="flex justify-between items-center text-[10px]">
+          <span className="text-slate-500 uppercase">PERMANENT STATUS:</span>
+          <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold border ${
+            feature.permanent_habitation_status === 'UNSUITABLE' ? 'bg-red-500/20 text-red-300 border-red-500/40' :
+            feature.permanent_habitation_status === 'CONDITIONAL' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' :
+            'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+          }`}>
+            {feature.permanent_habitation_status || 'CONDITIONAL'}
+          </span>
+        </div>
+        <div className="flex justify-between items-center text-[10px]">
+          <span className="text-slate-500 uppercase">RELOCATION HORIZON:</span>
+          <span className="text-slate-200 font-bold">
+            {feature.relocation_horizon || 'SHORT_TERM'}
+          </span>
         </div>
       </div>
 

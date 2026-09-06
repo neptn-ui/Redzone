@@ -1,7 +1,14 @@
 # backend/models.py
-# SQLAlchemy 2.0 + GeoAlchemy2 — Section 4 schema (7 tables).
+# SQLAlchemy 2.0 + GeoAlchemy2 — Section 4 schema (8 tables).
 # This is the single shared source of truth for all table definitions.
 # Scoring engines, API routers, and the ingestion layer all import from here.
+#
+# §0 REGION-AGNOSTIC DESIGN:
+#   REDZONE is a general-purpose engine; no region's name, coordinates, or
+#   district is hardcoded here.  The `regions` table is the operational key
+#   for all per-region logic: live-signal scoping, radius defaults, and hazard
+#   type configuration.  "Assam" is the first pilot dataset loaded via
+#   backend/ingestion/load_assam_pilot_data.py — it is not special in any way.
 # ============================================================================
 
 import os
@@ -75,12 +82,12 @@ class Base(DeclarativeBase):
 # ============================================================================
 
 class HazardType(str, enum.Enum):
-    landslide      = "landslide"
-    flood          = "flood"
+    landslide       = "landslide"
+    flood           = "flood"
     coastal_erosion = "coastal_erosion"
-    cloudburst     = "cloudburst"
-    subsidence     = "subsidence"       # added for Joshimath realism
-    debris_flow    = "debris_flow"      # added for Chamoli classification
+    cloudburst      = "cloudburst"
+    subsidence      = "subsidence"
+    debris_flow     = "debris_flow"
 
 
 class SignalType(str, enum.Enum):
@@ -100,6 +107,110 @@ class RiskClassification(str, enum.Enum):
     stable      = "stable"       # score 0.00–0.34 · Green
 
 
+class RelocationHorizon(str, enum.Enum):
+    """
+    §2.2 — Operational relocation horizon buckets (replaces the old
+    RiskClassification labels as the primary user-facing status).
+
+    IMMEDIATE   — Life-safety evacuation required. Hazard active/imminent;
+                  move population out now (hours to days), typically to
+                  temporary shelter. Never downgraded silently if no site
+                  is matched — escalate emergency shelter search instead.
+
+    SHORT_TERM  — Temporary relocation / continued displacement. Elevated
+                  sustained risk, not immediately life-threatening; interim
+                  housing while a permanent solution is arranged (weeks to ~1 yr).
+
+    MEDIUM_TERM — Permanent relocation / resettlement assessment. Hazard trend
+                  indicates long-term non-viability (recurring events, worsening
+                  deformation/erosion); triggers formal resettlement planning
+                  (land acquisition, community consultation). 1–3 years.
+
+    MONITOR     — No relocation currently recommended. Below action thresholds;
+                  continued sensor/satellite/live-signal observation.
+    """
+    IMMEDIATE   = "IMMEDIATE"
+    SHORT_TERM  = "SHORT_TERM"
+    MEDIUM_TERM = "MEDIUM_TERM"
+    MONITOR     = "MONITOR"
+
+
+class CurrentConditions(str, enum.Enum):
+    LIVE       = "LIVE"
+    RECENT     = "RECENT"
+    HISTORICAL = "HISTORICAL"
+
+
+class PermanentHabitationStatus(str, enum.Enum):
+    SUITABLE    = "SUITABLE"
+    CONDITIONAL = "CONDITIONAL"
+    UNSUITABLE  = "UNSUITABLE"
+    UNKNOWN     = "UNKNOWN"
+
+
+class TransportNodeType(str, enum.Enum):
+    ROAD_STAGING = "road_staging"
+    HELIPAD      = "helipad"
+    BOAT_JETTY   = "boat_jetty"
+    FOOT_TRAIL   = "foot_trail"
+
+
+# ============================================================================
+# Table 0 — regions  (§0: platform configuration unit)
+# Every habitation and candidate site belongs to exactly one region.
+# Live-signal polling, search-radius defaults, and API filtering are all
+# driven by this table — never by hardcoded coordinates or region names.
+# ============================================================================
+
+class Region(Base):
+    """
+    A geographic pilot region loaded into REDZONE.
+
+    One row per region (e.g. "Assam Brahmaputra-Barak Pilot").
+    center_lat/center_lon + bounding_radius_km define the approximate
+    spatial extent used for search-radius defaults and live-signal polling.
+
+    primary_hazard_types: JSON list of HazardType values active for this
+        region, e.g. ["flood", "coastal_erosion"].
+
+    owm_poll_enabled / usgs_poll_enabled: if True, the live_signals poller
+        automatically polls this region at every cycle — no code change needed
+        when a new region is added to this table.
+
+    data_status:
+        ACTIVE  — production quality, used in all API responses
+        PILOT   — demo/hackathon quality, labelled as such in responses
+        INACTIVE — temporarily disabled; not polled or returned by default
+    """
+    __tablename__ = "regions"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    name                 = Column(String(100), nullable=False, unique=True)
+    state                = Column(String(100), nullable=False)
+    country              = Column(String(100), nullable=False, default="India")
+    center_lat           = Column(Float, nullable=False)
+    center_lon           = Column(Float, nullable=False)
+    bounding_radius_km   = Column(Float, nullable=False, default=50.0)
+
+    # JSON list of HazardType string values active for this region.
+    # e.g. ["flood", "coastal_erosion"]
+    primary_hazard_types = Column(JSONB, nullable=False, default=list)
+
+    owm_poll_enabled     = Column(Boolean, nullable=False, default=True)
+    usgs_poll_enabled    = Column(Boolean, nullable=False, default=True)
+
+    # ACTIVE | PILOT | INACTIVE
+    data_status          = Column(String(20), nullable=False, default="PILOT")
+    added_at             = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    habitations      = relationship("Habitation",    back_populates="region")
+    candidate_sites  = relationship("CandidateSite", back_populates="region")
+
+    def __repr__(self):
+        return f"<Region id={self.id} name={self.name!r} status={self.data_status}>"
+
+
 # ============================================================================
 # Table 1 — habitations
 # The atomic unit of analysis: a named settlement / ward cluster.
@@ -110,6 +221,16 @@ class Habitation(Base):
     A settlement or ward cluster that may require relocation.
     geom     — centroid POINT  (EPSG:4326 / WGS84)
     boundary — approximate POLYGON outline of the habitation extent
+
+    §0: district and state are free-text descriptive fields only.
+    region_id is the operational foreign key — never default these values.
+
+    §1.1 terrain fields:
+        slope_degrees         — DEM-derived or SYNTH estimate; see terrain_data_source.
+        distance_to_hazard_km — distance to nearest classified hazard source.
+        terrain_data_source   — "REAL" (DEM/Bhuvan-derived) or "SYNTH" or "MISSING".
+        If terrain_data_source is "MISSING", scoring will surface a MISSING flag
+        rather than substituting a fake default.
     """
     __tablename__ = "habitations"
 
@@ -118,13 +239,26 @@ class Habitation(Base):
     geom       = Column(Geometry(geometry_type="POINT",    srid=4326), nullable=False)
     boundary   = Column(Geometry(geometry_type="POLYGON",  srid=4326), nullable=True)
     population = Column(Integer, nullable=False)
-    district   = Column(String(100), nullable=False, default="Majuli")
-    state      = Column(String(100), nullable=False, default="Assam")
+
+    # §0: no default — must be explicitly supplied by the seed script
+    district   = Column(String(100), nullable=False)
+    state      = Column(String(100), nullable=False)
 
     # Source-of-truth flag: REAL = from Census 2011; SYNTH = calibrated proxy
     population_source = Column(String(20), nullable=False, default="REAL")
 
+    # §0: region FK — operational key for live-signal scoping, radius defaults
+    region_id  = Column(Integer, ForeignKey("regions.id", ondelete="RESTRICT"),
+                        nullable=False, index=True)
+
+    # §1.1 Terrain attributes (replaces the deleted _PILOT_SLOPES/_PILOT_DISTANCES dicts)
+    # Every seed script must supply real values; "MISSING" is the honest fallback.
+    slope_degrees         = Column(Float, nullable=True)   # degrees; 0–90
+    distance_to_hazard_km = Column(Float, nullable=True)   # km to nearest hazard source
+    terrain_data_source   = Column(String(20), nullable=True)  # REAL | SYNTH | MISSING
+
     # Relationships
+    region          = relationship("Region",        back_populates="habitations")
     disaster_events = relationship("DisasterHistory", back_populates="habitation",
                                    cascade="all, delete-orphan")
     zone_score      = relationship("ZoneScore", back_populates="habitation",
@@ -143,14 +277,14 @@ class Habitation(Base):
 
 # ============================================================================
 # Table 2 — hazard_zones
-# Spatial polygons classifying known hazard extents in Chamoli.
+# Spatial polygons classifying known hazard extents.
 # ============================================================================
 
 class HazardZone(Base):
     """
     A polygon defining a classified hazard area.
     intensity_class 1–5 per §4 (5 = most severe).
-    source: e.g. 'ISRO Cartosat-2S Jan 2023', 'SYNTH — NH-7 corridor'.
+    source: e.g. 'Brahmaputra Board / ISRO Bhuvan', 'AUTO — sustained rainfall threshold'.
     """
     __tablename__ = "hazard_zones"
 
@@ -217,10 +351,17 @@ class CandidateSite(Base):
     """
     A candidate site for relocation.
 
-    Numeric attributes are SYNTH (calibrated) for the Chamoli pilot —
-    documented in data_sources.md Part D.
+    §0: district and state are free-text descriptive fields; region_id is the
+    operational FK. No default values — must be explicitly supplied per record.
 
     max_capacity_estimate: available_land_sqm ÷ 9.5 (NBC 2016 minimum) × usability_factor.
+
+    committed_population (§2.9): persons already committed to this site across
+    prior or ongoing relocation waves. Available capacity =
+    max_capacity_estimate − existing_occupancy − committed_population.
+
+    hazard_free (§2.3): set by the spatial site-verification job. True if the
+    site's geom does not fall inside or within 500m of any hazard_zones polygon.
     """
     __tablename__ = "candidate_sites"
 
@@ -234,16 +375,28 @@ class CandidateSite(Base):
     distance_to_water_km  = Column(Float, nullable=False)
     existing_occupancy    = Column(Integer, nullable=False, default=0)
     max_capacity_estimate = Column(Integer, nullable=False)
-    district              = Column(String(100), nullable=False, default="Chamoli")
-    state                 = Column(String(100), nullable=False, default="Uttarakhand")
+    committed_population  = Column(Integer, nullable=False, default=0)
 
-    # Synthetic flag per data_sources.md
+    # §0: no default — must be explicitly supplied by the seed script
+    district              = Column(String(100), nullable=False)
+    state                 = Column(String(100), nullable=False)
+
+    # §0: region FK
+    region_id             = Column(Integer, ForeignKey("regions.id", ondelete="RESTRICT"),
+                                   nullable=False, index=True)
+
+    # Provenance flag per data_sources.md
     data_source           = Column(String(20), nullable=False, default="SYNTH")
-    # Government-reported distance from Joshimath (REAL where available)
-    distance_from_joshimath_km = Column(Float, nullable=True)
+
+    # §2.3 hazard-free verification result (set by scheduled spatial check)
+    hazard_free                = Column(Boolean, nullable=True)   # None = not yet checked
+    overlapping_hazard_zone_id = Column(Integer, ForeignKey("hazard_zones.id",
+                                                             ondelete="SET NULL"),
+                                        nullable=True)
 
     # Relationships
-    zone_scores = relationship("ZoneScore", back_populates="matched_site")
+    region      = relationship("Region",      back_populates="candidate_sites")
+    zone_scores = relationship("ZoneScore",   back_populates="matched_site")
 
     __table_args__ = (
         CheckConstraint("slope_degrees >= 0 AND slope_degrees <= 90",
@@ -274,6 +427,10 @@ class ZoneScore(Base):
     they can never disagree because there is one row (§2, §11).
 
     explanation_json: full audit trail per §6 specification.
+
+    §2.2 relocation_horizon: the primary user-facing field.
+    relocation_horizon_rationale: human-readable explanation of which
+        condition(s) triggered the assigned horizon bucket.
     """
     __tablename__ = "zone_scores"
 
@@ -286,20 +443,18 @@ class ZoneScore(Base):
     capacity_score  = Column(Float, nullable=True)   # of matched site
     classification  = Column(SAEnum(RiskClassification, name="riskclassification"),
                               nullable=False)
+
+    # §2.2 Primary user-facing relocation horizon
+    relocation_horizon           = Column(SAEnum(RelocationHorizon, name="relocationhorizon"),
+                                          nullable=True)
+    relocation_horizon_rationale = Column(Text, nullable=True)
+
     matched_site_id = Column(Integer, ForeignKey("candidate_sites.id",
                                                    ondelete="SET NULL"),
                               nullable=True)
     computed_at     = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    # Full audit trail per §6 (example structure in spec):
-    # {
-    #   "habitation": "...",
-    #   "hazard_score": 0.86,
-    #   "classification": "Red — Immediate",
-    #   "breakdown": { <component>: {value, weight, contribution} },
-    #   "evidence": ["..."],
-    #   "matched_relocation_site": { name, distance_km, capacity_score }
-    # }
+    # Full audit trail per §6
     explanation_json = Column(JSONB, nullable=False, default=dict)
 
     # Cached live-signal state at time of computation
@@ -310,35 +465,41 @@ class ZoneScore(Base):
     # Whether any input came from cache (not live)
     data_is_cached    = Column(Boolean, nullable=False, default=False)
 
+    # §1.2 Independent current conditions and permanent habitation suitability
+    current_conditions          = Column(String(20), nullable=True, default="LIVE")
+    permanent_habitation_status = Column(String(20), nullable=True, default="CONDITIONAL")
+
     habitation   = relationship("Habitation",   back_populates="zone_score")
     matched_site = relationship("CandidateSite", back_populates="zone_scores")
 
     def __repr__(self):
         return (f"<ZoneScore hab={self.habitation_id} "
                 f"hazard={self.hazard_score:.3f} urgency={self.urgency_score:.3f} "
-                f"class={self.classification}>")
+                f"horizon={self.relocation_horizon}>")
 
 
 # ============================================================================
 # Table 6 — live_signals
 # Rolling log of rainfall and seismic readings fetched by APScheduler.
 # The latest record per (signal_type, region) drives live_trigger_multiplier.
+# region must match Region.name for join-free filtering in _score_habitation().
 # ============================================================================
 
 class LiveSignal(Base):
     """
     One row per API fetch from OpenWeatherMap or USGS Earthquake API.
     The API fetches at a fixed interval (APScheduler); old rows are retained
-    for trend analysis but scoring uses only the latest per region.
+    for trend analysis but scoring uses only the latest per (signal_type, region).
 
     fetched_at is the real timestamp from the API response — never hardcoded.
+    region must match Region.name exactly for the per-region scoping in zones.py.
     """
     __tablename__ = "live_signals"
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
     signal_type = Column(SAEnum(SignalType, name="signaltype"), nullable=False)
     value       = Column(Float, nullable=False)   # mm/hr for rainfall, Mw for seismic
-    region      = Column(String(100), nullable=False, default="Chamoli")
+    region      = Column(String(100), nullable=False)
     fetched_at  = Column(DateTime, nullable=False)
     is_cached   = Column(Boolean, nullable=False, default=False)
     raw_response = Column(JSONB, nullable=True)    # full API response for audit
@@ -349,7 +510,7 @@ class LiveSignal(Base):
 
     def __repr__(self):
         return (f"<LiveSignal type={self.signal_type} value={self.value} "
-                f"at={self.fetched_at} cached={self.is_cached}>")
+                f"region={self.region} at={self.fetched_at} cached={self.is_cached}>")
 
 
 # ============================================================================
@@ -398,6 +559,61 @@ class SatellitePass(Base):
         return (f"<SatellitePass id={self.id} hab={self.habitation_id} "
                 f"source={self.source} date={self.pass_date} "
                 f"signal={self.signal_type}={self.signal_value:.4f}>")
+
+
+# ============================================================================
+# Table 8 — transport_nodes (§4.2)
+# Distinct model objects for multimodal evacuation (Road staging, Helipad, Jetty)
+# ============================================================================
+
+class TransportNode(Base):
+    """
+    A multimodal transport node / staging facility for disaster relocation.
+    Tracks accessibility, capacity, operational status, and multimodal provenance.
+    """
+    __tablename__ = "transport_nodes"
+
+    id                       = Column(Integer, primary_key=True, autoincrement=True)
+    name                     = Column(String(200), nullable=False)
+    node_type                = Column(SAEnum(TransportNodeType, name="transportnodetype"), nullable=False)
+    geom                     = Column(Geometry(geometry_type="POINT", srid=4326), nullable=False)
+    capacity_persons         = Column(Integer, nullable=False, default=50)
+    status                   = Column(String(30), nullable=False, default="OPERATIONAL")  # OPERATIONAL | COMPROMISED | WEATHER_HOLD
+    region_id                = Column(Integer, ForeignKey("regions.id", ondelete="CASCADE"), nullable=False, index=True)
+    district                 = Column(String(100), nullable=False)
+    operational_availability = Column(String(100), nullable=False, default="24/7 All-weather")
+    data_provenance          = Column(String(30), nullable=False, default="OBSERVED")  # OBSERVED | DERIVED | MODELLED | UNAVAILABLE
+
+    __table_args__ = (
+        Index("ix_transport_nodes_geom", "geom", postgresql_using="gist"),
+    )
+
+    def __repr__(self):
+        return f"<TransportNode id={self.id} name={self.name!r} type={self.node_type} status={self.status}>"
+
+
+# ============================================================================
+# Table 9 — decision_audits (§6.3)
+# Human-in-the-loop decision capture (APPROVE / MODIFY / OVERRIDE)
+# ============================================================================
+
+class DecisionAudit(Base):
+    """
+    Audit log of human-in-the-loop operator decisions on RED ZONE relocation recommendations.
+    """
+    __tablename__ = "decision_audits"
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    habitation_id  = Column(Integer, ForeignKey("habitations.id", ondelete="CASCADE"), nullable=False, index=True)
+    decision_type  = Column(String(20), nullable=False)  # APPROVE | MODIFY | OVERRIDE
+    recommendation = Column(Text, nullable=False)
+    reason         = Column(Text, nullable=True)
+    operator       = Column(String(100), nullable=False, default="SDMA Officer")
+    timestamp      = Column(DateTime, nullable=False, default=datetime.utcnow)
+    details        = Column(JSONB, nullable=False, default=dict)
+
+    def __repr__(self):
+        return f"<DecisionAudit id={self.id} hab={self.habitation_id} action={self.decision_type} by={self.operator}>"
 
 
 # ============================================================================

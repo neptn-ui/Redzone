@@ -9,6 +9,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { api } from '../api/client'
 import { RainIcon, SeismicIcon } from './Icons'
+import { useAppStore } from '../context/AppStore'
 
 function SignalRow({ icon: Icon, name, value, unit, status, ageMin, color }) {
   const statusColors = {
@@ -83,8 +84,25 @@ export default function DataHealthBadge() {
     )
   }
 
-  const rain = health.rainfall || {}
-  const seis = health.seismic || {}
+  const { area } = useAppStore?.() || {}
+
+  // Match active region by name or state, or fallback to top-level signals or first region
+  const regionName = area?.name || area?.state || ''
+  let regionHealth = null
+  if (health.regions) {
+    for (const [k, v] of Object.entries(health.regions)) {
+      if (regionName && (k.toLowerCase().includes(regionName.toLowerCase()) || regionName.toLowerCase().includes(k.toLowerCase()))) {
+        regionHealth = v
+        break
+      }
+    }
+    if (!regionHealth) {
+      regionHealth = Object.values(health.regions)[0]
+    }
+  }
+
+  const rain = regionHealth?.rainfall || health.rainfall || {}
+  const seis = regionHealth?.seismic  || health.seismic  || {}
   const bothLive = rain.status === 'ok' && seis.status === 'ok'
   const anyLive  = rain.status === 'ok' || seis.status === 'ok'
 

@@ -12,8 +12,9 @@
 // ============================================================================
 
 import { useState, useEffect } from 'react'
-import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
-import { AppStoreProvider, useAppStore } from './context/AppStore'
+import { Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { AppStoreProvider, useAppStore, formatAreaBreadcrumb } from './context/AppStore'
+import { api } from './api/client'
 
 // Pages
 import CommandCenter     from './pages/CommandCenter'
@@ -85,16 +86,25 @@ function AreaBreadcrumb() {
   if (!area) {
     return <span className="text-[11px] text-slate-600 font-mono italic">No area selected — search to begin</span>
   }
-  const parts = [area.country, area.state, area.name].filter(Boolean)
+  
+  // Tier 0.5: Breadcrumb text comes ONLY from current AreaContext — never concatenated
+  const breadcrumbText = formatAreaBreadcrumb(area)
+
   return (
-    <span className="text-[11px] text-slate-400 font-mono tracking-wider uppercase">
-      {parts.map((p, i) => (
-        <span key={p}>
-          {i > 0 && <span className="text-slate-700 mx-1">/</span>}
-          <span className={i === parts.length - 1 ? 'text-slate-200 font-bold' : ''}>{p}</span>
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] text-slate-300 font-mono tracking-wider font-bold">
+        {breadcrumbText}
+      </span>
+      {area.is_seeded ? (
+        <span className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+          SEEDED REGION
         </span>
-      ))}
-    </span>
+      ) : (
+        <span className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
+          UNSEEDED AREA
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -126,11 +136,61 @@ function NoCoverage() {
   )
 }
 
+// ── Proactive Live Escalation Banner (Tier 11) ────────────────────────────────
+
+function ProactiveLiveAlert({ area, onNavigate }) {
+  const [escalation, setEscalation] = useState(null)
+
+  useEffect(() => {
+    if (!area || !area.is_seeded) {
+      setEscalation(null)
+      return
+    }
+    api.zones({ lat: area.lat, lon: area.lon, radius_km: 100 })
+      .then(zones => {
+        if (!Array.isArray(zones)) return
+        const imm = zones.filter(z => z.relocation_horizon === 'IMMEDIATE' || z.classification === 'immediate')
+        const unsuit = zones.filter(z => z.permanent_habitation_status === 'UNSUITABLE')
+        if (imm.length > 0 || unsuit.length > 0) {
+          setEscalation({
+            immediateCount: imm.length,
+            unsuitableCount: unsuit.length,
+            topHabitation: imm[0]?.name || unsuit[0]?.name,
+          })
+        } else {
+          setEscalation(null)
+        }
+      })
+      .catch(() => setEscalation(null))
+  }, [area])
+
+  if (!escalation) return null
+
+  return (
+    <div className="bg-gradient-to-r from-red-950/80 via-amber-950/50 to-red-950/80 border-b border-red-500/30 px-4 py-1.5 flex items-center justify-between text-[10px] font-mono z-40 shrink-0 select-none">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="w-2 h-2 rounded-full bg-red-500 animate-ping shrink-0" />
+        <span className="font-bold text-red-300 uppercase tracking-wider shrink-0">PROACTIVE ESCALATION:</span>
+        <span className="text-slate-200 truncate">
+          {escalation.immediateCount} settlement(s) elevated to <strong className="text-red-400">IMMEDIATE</strong> horizon ({escalation.topHabitation}) · {escalation.unsuitableCount} designated permanent RED ZONE
+        </span>
+      </div>
+      <button
+        onClick={onNavigate}
+        className="px-2.5 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-200 font-bold uppercase tracking-wider text-[9px] transition-all shrink-0 ml-2"
+      >
+        Review Directive →
+      </button>
+    </div>
+  )
+}
+
 // ── Shell (inner — has access to store) ──────────────────────────────────────
 
 function Shell() {
   const { area, areaStatus } = useAppStore()
   const location = useLocation()
+  const navigate = useNavigate()
   const [searchOpen, setSearchOpen] = useState(!area)
 
   return (
@@ -170,6 +230,9 @@ function Shell() {
           </button>
         </div>
       </header>
+
+      {/* ── Proactive Escalation Live Banner (Tier 11) ── */}
+      <ProactiveLiveAlert area={area} onNavigate={() => navigate('/')} />
 
       {/* ── Body ── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">

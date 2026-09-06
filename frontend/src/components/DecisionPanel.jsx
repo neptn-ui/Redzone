@@ -14,6 +14,7 @@ import { useNavigate } from 'react-router-dom'
 import { useZoneDetail } from '../hooks/useZones'
 import { api } from '../api/client'
 import { ShieldAlertIcon, CloseIcon, LocationIcon, RefreshIcon } from './Icons'
+import { HorizonBadge, TerrainStatusBadge } from './RiskBadge'
 
 function TrajectoryChart() {
   // A simple simulated SVG line chart for Risk Trajectory
@@ -106,7 +107,8 @@ export default function DecisionPanel({ habitationId, onClose }) {
 
   if (error || !data) return null
 
-  const isCritical = data.classification === 'immediate' || data.classification === 'short_term'
+  const horizon    = data.relocation_horizon || 'MONITOR'
+  const isCritical = horizon === 'IMMEDIATE' || horizon === 'SHORT_TERM'
 
   // Extract real breakdown components from explanation
   const hazardComps = explanation?.hazard?.components || {}
@@ -170,10 +172,21 @@ export default function DecisionPanel({ habitationId, onClose }) {
         
         <div className="z-10 pr-6 w-full">
           <h2 className="text-xl font-extrabold text-white tracking-tight leading-tight mb-2 uppercase">{data.name}</h2>
-          <div className="flex items-center gap-4 mb-4">
+          <div className="flex items-center gap-3 mb-3 flex-wrap">
             <div className="text-sm font-semibold text-slate-300">
               <span className="font-mono text-white">{(data.population || 0).toLocaleString()}</span> residents
             </div>
+            {/* §2.2 Relocation horizon — primary status */}
+            <HorizonBadge horizon={horizon} showSublabel size="sm" />
+            {/* §1.1 Terrain data status */}
+            {data.terrain_data_status && (
+              <TerrainStatusBadge status={data.terrain_data_status} />
+            )}
+            {data.region_name && (
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/20 text-blue-400">
+                {data.region_name}
+              </span>
+            )}
           </div>
           
           <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.04]">
@@ -320,7 +333,9 @@ export default function DecisionPanel({ habitationId, onClose }) {
           <div className="space-y-3 relative before:absolute before:inset-y-1 before:left-1.5 before:w-px before:bg-white/10">
             {[
               { time: timeStr, text: `Hazard score computed: ${(data.hazard_score * 100).toFixed(0)}/100` },
+              { time: timeStr, text: `Relocation horizon: ${horizon}` },
               { time: timeStr, text: `Classification: ${data.classification?.replace('_', ' ')}` },
+              ...(data.terrain_data_status ? [{ time: timeStr, text: `Terrain data: ${data.terrain_data_status}` }] : []),
               ...(data.matched_site ? [{ time: timeStr, text: `Matched to: ${data.matched_site}` }] : []),
               ...(liveSignals.trigger_multiplier > 1 ? [{ time: timeStr, text: `Live trigger active: ×${liveSignals.trigger_multiplier?.toFixed(2)}` }] : []),
             ].map((event, i) => (

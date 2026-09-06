@@ -96,6 +96,11 @@ class HazardResult:
     classification:           str     # "immediate" | "short_term" | "medium_term" | "stable"
     classification_label:     str     # human-readable with colour hint
 
+    # §1.2 Permanent suitability vs current conditions
+    permanent_habitation_status:    str = "CONDITIONAL"  # "SUITABLE" | "CONDITIONAL" | "UNSUITABLE" | "UNKNOWN"
+    permanent_habitation_rationale: str = ""
+    current_conditions:             str = "LIVE"         # "LIVE" | "RECENT" | "HISTORICAL"
+
     # Free-text evidence strings (populated by caller from real data)
     evidence:                 list[str] = field(default_factory=list)
 
@@ -110,6 +115,9 @@ class HazardResult:
             "base_hazard_score": round(self.base_hazard_score, 4),
             "live_trigger_multiplier": round(self.live_trigger_multiplier, 4),
             "classification": self.classification_label,
+            "permanent_habitation_status": self.permanent_habitation_status,
+            "permanent_habitation_rationale": self.permanent_habitation_rationale,
+            "current_conditions": self.current_conditions,
             "breakdown": {
                 "hazard_intensity": {
                     "value":        round(self.hazard_intensity_norm, 4),
@@ -342,6 +350,57 @@ def compute_hazard_score(
     )
 
 
+def compute_permanent_habitation_status(
+    base_hazard_score: float = 0.0,
+    slope_degrees: float = 0.0,
+    distance_to_hazard_km: float = 10.0,
+    event_count: int = 0,
+    max_severity_ever: int = 1,
+    terrain_data_status: str = "REAL",
+    baseline_hazard_score: Optional[float] = None,
+    historical_event_count: Optional[int] = None,
+    high_severity_event_count: Optional[int] = None,
+    soil_erosion_rate: Optional[float] = None,
+    active_landslide_zone: bool = False,
+    **kwargs,
+) -> tuple[str, str]:
+    """
+    §1.2 — Derives permanent habitation suitability from long-term terrain exposure,
+    historical disaster recurrence, and baseline hazard pattern — NOT from today's
+    rainfall/seismic readings alone. A quiet-weather day must not flip it to SUITABLE.
+
+    Returns:
+        (status, rationale)
+        status in {"SUITABLE", "CONDITIONAL", "UNSUITABLE", "UNKNOWN"}
+    """
+    b_score = baseline_hazard_score if baseline_hazard_score is not None else base_hazard_score
+    e_count = historical_event_count if historical_event_count is not None else event_count
+    max_sev = high_severity_event_count if high_severity_event_count is not None else max_severity_ever
+
+    if terrain_data_status == "MISSING" and e_count == 0 and b_score < 0.2:
+        return "UNKNOWN", "Insufficient terrain and historical disaster records to determine permanent suitability"
+
+    if (
+        b_score >= 0.65
+        or (e_count >= 3 and max_sev >= 2)
+        or (slope_degrees >= 30.0)
+        or (soil_erosion_rate is not None and soil_erosion_rate >= 20.0)
+        or active_landslide_zone
+    ):
+        return "UNSUITABLE", "Unsuitable for permanent habitation due to chronic disaster recurrence and extreme terrain exposure"
+
+    if (
+        b_score >= 0.40
+        or e_count >= 1
+        or slope_degrees >= 15.0
+        or distance_to_hazard_km <= 2.5
+        or (soil_erosion_rate is not None and soil_erosion_rate >= 5.0)
+    ):
+        return "CONDITIONAL", "Conditional permanent habitation — recurring hazard zone requiring structural protection or seasonal relocation"
+
+    return "SUITABLE", "Suitable for permanent habitation under baseline geological and environmental conditions"
+
+
 def classify_hazard_score(score: float) -> tuple[str, str]:
     """
     Maps a final_hazard_score to (classification_key, human_label).
@@ -376,14 +435,13 @@ def compute_hazard_score_from_raw(
     live_rainfall_mm_per_hr: Optional[float] = None,
     live_seismic_magnitude: Optional[float] = None,
     rainfall_mm_per_hr: Optional[float] = None,
+    current_conditions: str = "LIVE",
+    terrain_data_status: str = "REAL",
     **kwargs,
 ) -> HazardResult:
     """
     Convenience wrapper: accepts raw domain values, normalises internally,
     then calls compute_hazard_score().
-
-    Use this in the API layer and the test gate (§14.3) where raw values
-    are more readable than pre-normalised floats.
     """
     if rainfall_mm_hr is None:
         rainfall_mm_hr = rainfall_mm_per_hr if rainfall_mm_per_hr is not None else live_rainfall_mm_per_hr
@@ -409,7 +467,7 @@ def compute_hazard_score_from_raw(
             evidence.append(f"Recent seismic event: Mw {seismic_magnitude:.1f} "
                             f"(trigger multiplier active: {mult:.3f})")
 
-    return compute_hazard_score(
+    res = compute_hazard_score(
         habitation_name=habitation_name,
         hazard_intensity_norm=normalize_hazard_intensity(intensity_class),
         frequency_history_norm=normalize_frequency_history(event_count, max_severity_ever),
@@ -420,6 +478,19 @@ def compute_hazard_score_from_raw(
         live_trigger_multiplier=mult,
         evidence=evidence,
     )
+
+    perm_status, perm_rationale = compute_permanent_habitation_status(
+        base_hazard_score=res.base_hazard_score,
+        slope_degrees=slope_degrees,
+        distance_to_hazard_km=distance_to_hazard_km,
+        event_count=event_count,
+        max_severity_ever=max_severity_ever,
+        terrain_data_status=terrain_data_status,
+    )
+    res.permanent_habitation_status = perm_status
+    res.permanent_habitation_rationale = perm_rationale
+    res.current_conditions = current_conditions
+    return res
 
 
 # ============================================================================

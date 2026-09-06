@@ -14,6 +14,7 @@ import { useAppStore } from '../context/AppStore'
 import { api } from '../api/client'
 import { getRoute } from '../api/geo'
 import HazardMap from '../components/HazardMap'
+import { HazardFreeBadge } from '../components/RiskBadge'
 
 // ── Capacity factor breakdown ────────────────────────────────────────────────
 
@@ -84,6 +85,15 @@ function SiteCard({ site, selected, onClick }) {
         <div className="shrink-0 font-mono text-sm font-bold text-blue-400">
           {score != null ? `${score}%` : '—'}
         </div>
+      </div>
+      {/* §2.3 Hazard-free verification badge */}
+      <div className="mb-1.5 flex items-center gap-2 flex-wrap">
+        <HazardFreeBadge hazardFree={site.hazard_free} />
+        {site.region_name && (
+          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/20 text-blue-400">
+            {site.region_name}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-3 text-[10px] text-slate-600 font-mono">
         <span>Cap: {cap?.toLocaleString() ?? '—'}</span>

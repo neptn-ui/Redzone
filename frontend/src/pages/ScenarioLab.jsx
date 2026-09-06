@@ -145,6 +145,13 @@ export default function ScenarioLab() {
   const [running,        setRunning]        = useState(false)
   const [runError,       setRunError]       = useState(null)
   const [projectedZones, setProjectedZones] = useState([])
+  const [hazardGeometry, setHazardGeometry] = useState(null)
+  const [populationSummary, setPopulationSummary] = useState(null)
+  const [capacityGapReport, setCapacityGapReport] = useState(null)
+  const [transportAssessment, setTransportAssessment] = useState(null)
+  const [aiDecisionBrief, setAiDecisionBrief] = useState(null)
+  const [simulationDelta, setSimulationDelta] = useState(null)
+  const [rightPanelTab, setRightPanelTab]   = useState('brief')
   const debounceRef = useRef(null)
 
   // Load baseline zones
@@ -178,10 +185,18 @@ export default function ScenarioLab() {
       const projected = result?.zones ?? result ?? []
       setProjectedZones(projected)
       setScenarioProjection(projected)
+      setHazardGeometry(result?.hazard_geometry ?? null)
+      setPopulationSummary(result?.population_summary ?? null)
+      setCapacityGapReport(result?.capacity_gap_report ?? null)
+      setTransportAssessment(result?.transport_assessment ?? null)
+      setAiDecisionBrief(result?.ai_decision_brief ?? null)
+      setSimulationDelta(result?.delta ?? null)
     } catch (err) {
       setRunError('Scenario engine unavailable — backend not running')
       // Show baseline as projected when backend unavailable
       setProjectedZones([])
+      setHazardGeometry(null)
+      setAiDecisionBrief(null)
     } finally {
       setRunning(false)
     }
@@ -208,6 +223,12 @@ export default function ScenarioLab() {
     setActivePreset('normal')
     setParams({ rainfall_mm_24h: 0, river_level_delta_m: 0, soil_saturation_pct: 0 })
     setProjectedZones([])
+    setHazardGeometry(null)
+    setPopulationSummary(null)
+    setCapacityGapReport(null)
+    setTransportAssessment(null)
+    setAiDecisionBrief(null)
+    setSimulationDelta(null)
     resetScenario()
   }
 
@@ -320,7 +341,12 @@ export default function ScenarioLab() {
 
       {/* ── Map ── */}
       <div className="flex-1 min-w-0 relative">
-        <HazardMap zones={mapZones} sites={[]} />
+        <HazardMap
+          zones={mapZones}
+          sites={[]}
+          simulatedHazardGeometry={hazardGeometry}
+          isSimulationMode={mode === 'SIMULATION' && projectedZones.length > 0}
+        />
 
         {/* Simulation overlay */}
         <AnimatePresence>
@@ -329,30 +355,45 @@ export default function ScenarioLab() {
               initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
-              className="absolute top-4 left-4 z-20 bg-[#0c101d] border border-blue-500/40 rounded-xl p-3 shadow-2xl"
+              className="absolute top-4 left-4 z-20 bg-[#0c101d] border border-blue-500/40 rounded-xl p-3 shadow-2xl max-w-xs"
             >
-              <div className="text-[9px] font-bold uppercase tracking-widest text-blue-400 font-mono mb-2">SIMULATION RESULTS</div>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[9px] font-bold uppercase tracking-widest text-blue-400 font-mono">SIMULATION RESULTS</span>
+                <span className="text-[8px] font-mono text-blue-400/80 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20">COUNTERFACTUAL</span>
+              </div>
+              <div className="flex items-center gap-3 mb-2">
                 <div>
-                  <div className="text-[9px] text-slate-600 font-mono">BASELINE</div>
-                  <div className="text-lg font-extrabold font-mono text-slate-300">{immediateBaseline}</div>
-                  <div className="text-[9px] text-slate-600">immediate</div>
+                  <div className="text-[8px] text-slate-500 font-mono uppercase">BASELINE</div>
+                  <div className="text-base font-extrabold font-mono text-slate-300">{immediateBaseline}</div>
+                  <div className="text-[8px] text-slate-500">immediate</div>
                 </div>
                 <div className="text-slate-600">→</div>
                 <div>
-                  <div className="text-[9px] text-blue-400 font-mono">SIMULATED</div>
-                  <div className={`text-lg font-extrabold font-mono ${delta > 0 ? 'text-red-400' : delta < 0 ? 'text-emerald-400' : 'text-slate-300'}`}>
+                  <div className="text-[8px] text-blue-400 font-mono uppercase">SIMULATED</div>
+                  <div className={`text-base font-extrabold font-mono ${delta > 0 ? 'text-red-400' : delta < 0 ? 'text-emerald-400' : 'text-slate-300'}`}>
                     {immediateProjected}
                   </div>
-                  <div className="text-[9px] text-slate-600">immediate</div>
+                  <div className="text-[8px] text-slate-500">immediate</div>
                 </div>
                 {delta !== 0 && (
-                  <div className={`text-sm font-extrabold font-mono ${delta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                  <div className={`text-xs font-extrabold font-mono ml-auto ${delta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                     {delta > 0 ? `+${delta}` : `${delta}`}
                   </div>
                 )}
               </div>
-              <div className="mt-2 text-[8px] text-blue-400/60 font-mono">DATA STATUS: SIMULATED</div>
+
+              {populationSummary && (
+                <div className="pt-2 border-t border-white/[0.06] grid grid-cols-2 gap-2 text-[9px] font-mono">
+                  <div>
+                    <span className="text-slate-500 block">EXPOSED POP</span>
+                    <span className="font-bold text-amber-400 text-xs">{(populationSummary.exposed_population || 0).toLocaleString()}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block">RELOC DEMAND</span>
+                    <span className="font-bold text-red-400 text-xs">{(populationSummary.relocation_demand || 0).toLocaleString()}</span>
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -368,7 +409,7 @@ export default function ScenarioLab() {
         )}
       </div>
 
-      {/* ── Comparison panel (visible when simulation ran) ── */}
+      {/* ── Enhanced Right Side Panel (AI Brief, Exposure & Capacity, Zones) ── */}
       <AnimatePresence>
         {projectedZones.length > 0 && zones.length > 0 && (
           <motion.div
@@ -377,38 +418,222 @@ export default function ScenarioLab() {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 40, opacity: 0 }}
             transition={{ type: 'spring', stiffness: 150, damping: 22 }}
-            className="w-64 shrink-0 flex flex-col border-l border-white/[0.06] bg-[#0b0f1a]/95 overflow-hidden"
+            className="w-96 shrink-0 flex flex-col border-l border-white/[0.06] bg-[#0b0f1a]/95 overflow-hidden"
           >
-            {/* Header */}
-            <div className="px-3 py-2.5 border-b border-white/[0.06] shrink-0">
-              <div className="text-[9px] font-bold uppercase tracking-widest text-slate-500 font-mono">BASELINE vs SIMULATED</div>
+            {/* Tab Navigation */}
+            <div className="flex border-b border-white/[0.06] bg-black/20 shrink-0">
+              <button
+                onClick={() => setRightPanelTab('brief')}
+                className={`flex-1 py-2.5 text-center text-[10px] font-bold font-mono uppercase tracking-wider transition-all border-b-2 ${
+                  rightPanelTab === 'brief'
+                    ? 'border-blue-400 text-blue-400 bg-blue-500/5'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                AI Decision Brief
+              </button>
+              <button
+                onClick={() => setRightPanelTab('exposure')}
+                className={`flex-1 py-2.5 text-center text-[10px] font-bold font-mono uppercase tracking-wider transition-all border-b-2 ${
+                  rightPanelTab === 'exposure'
+                    ? 'border-amber-400 text-amber-400 bg-amber-500/5'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Exposure
+              </button>
+              <button
+                onClick={() => setRightPanelTab('zones')}
+                className={`flex-1 py-2.5 text-center text-[10px] font-bold font-mono uppercase tracking-wider transition-all border-b-2 ${
+                  rightPanelTab === 'zones'
+                    ? 'border-emerald-400 text-emerald-400 bg-emerald-500/5'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Zones ({zones.length})
+              </button>
             </div>
 
-            {/* Column labels */}
-            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/[0.04] shrink-0 bg-white/[0.01]">
-              <div className="flex-1 text-[9px] text-slate-600 font-mono">ZONE</div>
-              <div className="w-10 text-right text-[9px] text-slate-600 font-mono">BASE</div>
-              <div className="w-4" />
-              <div className="w-10 text-right text-[9px] text-blue-400 font-mono">SIM</div>
-            </div>
+            {/* TAB 1: AI DECISION BRIEF */}
+            {rightPanelTab === 'brief' && (
+              <div className="flex-1 overflow-y-auto p-3.5 space-y-3 min-h-0 text-[11px] leading-relaxed">
+                {aiDecisionBrief ? (
+                  <>
+                    <div className="p-2.5 rounded-lg border border-blue-500/30 bg-blue-500/10">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span className="text-[9px] font-mono font-extrabold uppercase px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30">
+                          {aiDecisionBrief.decision_directive_code}
+                        </span>
+                        <span className="text-[8px] font-mono text-slate-400">
+                          {aiDecisionBrief.confidence} CONFIDENCE
+                        </span>
+                      </div>
+                      <div className="text-xs font-bold text-slate-100">{aiDecisionBrief.area_name} Operational Brief</div>
+                    </div>
 
-            <div className="flex-1 overflow-y-auto min-h-0">
-              {zones.slice(0, 20).map(z => {
-                const proj = projectedZones.find(p => p.habitation_id === z.habitation_id)
-                return (
-                  <ComparisonRow
-                    key={z.habitation_id}
-                    zone={z}
-                    baseline={z}
-                    projected={proj ?? null}
-                  />
-                )
-              })}
-            </div>
+                    <div className="space-y-2.5 text-slate-300">
+                      <div>
+                        <span className="text-[9px] font-bold font-mono uppercase text-blue-400 block mb-0.5">WHAT CHANGED</span>
+                        <p className="text-[10px] text-slate-300 bg-white/[0.02] p-2 rounded border border-white/[0.04]">{aiDecisionBrief.what_changed}</p>
+                      </div>
 
-            <div className="p-3 border-t border-white/[0.04] shrink-0 text-[9px] text-slate-700 font-mono">
-              All projected values: SIMULATED — Formula: hazard_engine.py with modified inputs
-            </div>
+                      <div>
+                        <span className="text-[9px] font-bold font-mono uppercase text-amber-400 block mb-0.5">WHY IT MATTERS</span>
+                        <p className="text-[10px] text-slate-300 bg-white/[0.02] p-2 rounded border border-white/[0.04]">{aiDecisionBrief.why_it_matters}</p>
+                      </div>
+
+                      <div>
+                        <span className="text-[9px] font-bold font-mono uppercase text-red-400 block mb-0.5">WHO IS AT RISK</span>
+                        <p className="text-[10px] text-slate-300 bg-white/[0.02] p-2 rounded border border-white/[0.04]">{aiDecisionBrief.who_is_at_risk}</p>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="text-[9px] font-bold font-mono uppercase text-emerald-400 block mb-0.5">WHERE TO GO</span>
+                          <p className="text-[10px] text-slate-300 bg-white/[0.02] p-1.5 rounded border border-white/[0.04]">{aiDecisionBrief.where_they_should_go}</p>
+                        </div>
+                        <div>
+                          <span className="text-[9px] font-bold font-mono uppercase text-purple-400 block mb-0.5">HOW TO MOVE</span>
+                          <p className="text-[10px] text-slate-300 bg-white/[0.02] p-1.5 rounded border border-white/[0.04]">{aiDecisionBrief.how_they_should_move}</p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="text-[9px] font-bold font-mono uppercase text-orange-400 block mb-0.5">CAPACITY CONSTRAINT</span>
+                        <p className="text-[10px] text-slate-300 bg-white/[0.02] p-2 rounded border border-white/[0.04]">{aiDecisionBrief.capacity_constraint}</p>
+                      </div>
+
+                      <div>
+                        <span className="text-[9px] font-bold font-mono uppercase text-sky-400 block mb-0.5">RESOURCE IMPLICATIONS</span>
+                        <p className="text-[10px] text-slate-300 bg-white/[0.02] p-2 rounded border border-white/[0.04]">{aiDecisionBrief.resource_implication}</p>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg border border-red-500/30 bg-red-500/5">
+                        <span className="text-[9px] font-extrabold font-mono uppercase text-red-400 block mb-1">RECOMMENDED SDMA DIRECTIVE</span>
+                        <p className="text-[10px] font-medium text-slate-200">{aiDecisionBrief.recommended_sdma_action}</p>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-slate-500 italic text-center py-8">Run a simulation scenario to synthesize an operational SDMA Decision Brief.</div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: EXPOSURE & CAPACITY */}
+            {rightPanelTab === 'exposure' && (
+              <div className="flex-1 overflow-y-auto p-3.5 space-y-3 min-h-0 text-[11px]">
+                {populationSummary ? (
+                  <>
+                    <div className="p-2 rounded-lg border border-amber-500/30 bg-amber-500/10 text-[9px] font-mono text-amber-300">
+                      SPATIAL POPULATION EXPOSURE (§4.1) · WORLDPOP 2025 MODELLED
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="p-2.5 rounded bg-white/[0.02] border border-white/[0.06] flex items-center justify-between">
+                        <div>
+                          <div className="text-[9px] text-slate-400 uppercase font-mono">Total Area Population</div>
+                          <div className="text-[8px] text-slate-500 font-mono">WorldPop 2025 + Census baseline</div>
+                        </div>
+                        <div className="text-sm font-bold font-mono text-slate-200">
+                          {(populationSummary.total_area_population || 0).toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded bg-white/[0.02] border border-white/[0.06] flex items-center justify-between">
+                        <div>
+                          <div className="text-[9px] text-amber-400 uppercase font-mono">Exposed Population</div>
+                          <div className="text-[8px] text-slate-500 font-mono">Spatial inundation polygon intersection</div>
+                        </div>
+                        <div className="text-sm font-bold font-mono text-amber-400">
+                          {(populationSummary.exposed_population || 0).toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded bg-white/[0.02] border border-white/[0.06] flex items-center justify-between">
+                        <div>
+                          <div className="text-[9px] text-red-400 uppercase font-mono">Relocation Demand</div>
+                          <div className="text-[8px] text-slate-500 font-mono">IMMEDIATE / SHORT_TERM horizon demand</div>
+                        </div>
+                        <div className="text-sm font-bold font-mono text-red-400">
+                          {(populationSummary.relocation_demand || 0).toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded bg-white/[0.02] border border-white/[0.06] flex items-center justify-between">
+                        <div>
+                          <div className="text-[9px] text-purple-400 uppercase font-mono">High-Vulnerability Cohort</div>
+                          <div className="text-[8px] text-slate-500 font-mono">Bedridden, elderly, disabled priority</div>
+                        </div>
+                        <div className="text-sm font-bold font-mono text-purple-400">
+                          {(populationSummary.high_vulnerability_exposed_population || 0).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+
+                    {capacityGapReport && (
+                      <div className="pt-2 border-t border-white/[0.06] space-y-2">
+                        <div className="text-[9px] font-bold font-mono uppercase text-slate-400">CAPACITY-GAP ANALYSIS (§4.2)</div>
+                        <div className={`p-2.5 rounded border ${capacityGapReport.status === 'DEFICIT_GAP' ? 'border-red-500/40 bg-red-500/10' : 'border-emerald-500/40 bg-emerald-500/10'}`}>
+                          <div className="flex items-center justify-between text-[10px] font-mono mb-1">
+                            <span className="font-bold">{capacityGapReport.status === 'DEFICIT_GAP' ? 'CAPACITY SHORTFALL' : 'VERIFIED HEADROOM'}</span>
+                            <span className="font-bold">{capacityGapReport.status}</span>
+                          </div>
+                          <div className="text-xs text-slate-200 leading-snug">{capacityGapReport.summary}</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {transportAssessment && (
+                      <div className="pt-2 border-t border-white/[0.06] space-y-2">
+                        <div className="text-[9px] font-bold font-mono uppercase text-slate-400">MULTIMODAL TRANSPORT (§5.1)</div>
+                        <div className="p-2.5 rounded bg-white/[0.02] border border-white/[0.06]">
+                          <div className="flex items-center justify-between text-[10px] font-mono mb-1">
+                            <span className="text-purple-400 font-bold">MODE: {transportAssessment.recommended_mode}</span>
+                            <span className={transportAssessment.road_passable ? 'text-emerald-400' : 'text-red-400'}>
+                              {transportAssessment.road_passable ? 'ROAD PASSABLE' : 'ROAD BREACHED'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-300">{transportAssessment.rationale}</div>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-slate-500 italic text-center py-8">Run simulation to generate spatial population exposure.</div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 3: ZONE COMPARISON TABLE */}
+            {rightPanelTab === 'zones' && (
+              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/[0.04] shrink-0 bg-white/[0.01]">
+                  <div className="flex-1 text-[9px] text-slate-600 font-mono">ZONE</div>
+                  <div className="w-10 text-right text-[9px] text-slate-600 font-mono">BASE</div>
+                  <div className="w-4" />
+                  <div className="w-10 text-right text-[9px] text-blue-400 font-mono">SIM</div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto min-h-0">
+                  {zones.slice(0, 30).map(z => {
+                    const proj = projectedZones.find(p => p.habitation_id === z.habitation_id)
+                    return (
+                      <ComparisonRow
+                        key={z.habitation_id}
+                        zone={z}
+                        baseline={z}
+                        projected={proj ?? null}
+                      />
+                    )
+                  })}
+                </div>
+
+                <div className="p-2.5 border-t border-white/[0.04] shrink-0 text-[8px] text-slate-600 font-mono">
+                  All projected values: SIMULATED — Formula: hazard_engine.py with modified inputs
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>

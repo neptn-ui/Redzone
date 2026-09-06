@@ -304,3 +304,107 @@ def compute_capacity_score_from_raw(
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, float(v)))
+
+
+# ============================================================================
+# Tier 4.2 & 4.3 — Capacity-Gap Analysis & Provenance Engine
+# ============================================================================
+
+@dataclass
+class CapacityGapReport:
+    total_relocation_demand: int
+    total_gross_capacity: int
+    total_committed_population: int
+    total_available_capacity: int
+    status: str              # "SURPLUS_HEADROOM" | "DEFICIT_GAP"
+    headroom_or_gap: int     # positive for headroom, negative for gap
+    action_required: str     # "Capacity adequate for immediate intake" | "Identify additional candidate sites"
+    sites_included: list[dict]
+    source: str              # "NBC 2016 Table 3 / SDMA Registry"
+    vintage: str             # "NBC 2016 / ASDMA 2026"
+    confidence: str          # "HIGH" | "MEDIUM"
+    provenance_details: str
+
+    def to_dict(self) -> dict:
+        return {
+            "total_relocation_demand": self.total_relocation_demand,
+            "total_gross_capacity": self.total_gross_capacity,
+            "total_committed_population": self.total_committed_population,
+            "total_available_capacity": self.total_available_capacity,
+            "status": self.status,
+            "headroom_or_gap": self.headroom_or_gap,
+            "action_required": self.action_required,
+            "sites_included": self.sites_included,
+            "source": self.source,
+            "vintage": self.vintage,
+            "confidence": self.confidence,
+            "provenance_details": self.provenance_details,
+        }
+
+
+def compute_capacity_gap_analysis(
+    relocation_demand: int,
+    candidate_sites: list[dict],
+) -> CapacityGapReport:
+    """
+    Tier 4.2: RELOCATION DEMAND vs AVAILABLE SAFE CAPACITY -> HEADROOM or GAP.
+    On a gap: explicit ACTION "Identify additional candidate sites".
+    Never selects an over-capacity site as though it can accommodate everyone.
+    
+    Tier 4.3: Aggregate capacity figure is inspectable down to:
+    sites included, gross capacity, committed population, resulting headroom, source, vintage, confidence.
+    """
+    total_gross = 0
+    total_committed = 0
+    total_avail = 0
+    sites_summary = []
+
+    for s in candidate_sites:
+        name = s.get("name", "Unknown Site")
+        gross = int(s.get("max_capacity_estimate", 0))
+        occ = int(s.get("existing_occupancy", 0))
+        comm = int(s.get("committed_population", 0))
+        avail = max(0, gross - occ - comm)
+        
+        total_gross += gross
+        total_committed += (occ + comm)
+        total_avail += avail
+        
+        sites_summary.append({
+            "site_name": name,
+            "gross_capacity": gross,
+            "committed_population": occ + comm,
+            "available_headroom": avail,
+            "hazard_free": s.get("hazard_free", True),
+            "source": s.get("data_source", "SDMA Site Registry / NBC 2016"),
+        })
+
+    headroom_or_gap = total_avail - relocation_demand
+    
+    if headroom_or_gap >= 0:
+        status = "SURPLUS_HEADROOM"
+        action = "Capacity adequate for immediate intake and phased resettlement."
+    else:
+        status = "DEFICIT_GAP"
+        action = "Identify additional candidate sites. Relocation demand exceeds verified safe capacity."
+
+    provenance_details = (
+        f"Calculated from {len(candidate_sites)} candidate site(s). Gross capacity derived from NBC 2016 "
+        f"standard ({NBC_MIN_AREA_PER_PERSON_SQM} m²/person) minus committed/existing occupancy."
+    )
+
+    return CapacityGapReport(
+        total_relocation_demand=relocation_demand,
+        total_gross_capacity=total_gross,
+        total_committed_population=total_committed,
+        total_available_capacity=total_avail,
+        status=status,
+        headroom_or_gap=headroom_or_gap,
+        action_required=action,
+        sites_included=sites_summary,
+        source="NBC 2016 Table 3 / SDMA Registry",
+        vintage="NBC 2016 / ASDMA 2026",
+        confidence="HIGH" if len(candidate_sites) > 0 else "MEDIUM",
+        provenance_details=provenance_details,
+    )
+

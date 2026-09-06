@@ -1,6 +1,13 @@
 # backend/ingestion/live_signals.py
 # Live Signal Pollers — APScheduler jobs for rainfall and seismic data.
 #
+# §0 REGION-AGNOSTIC DESIGN:
+#   This module has NO hardcoded region coordinates or names.
+#   At every poll cycle, it reads all Region rows where owm_poll_enabled /
+#   usgs_poll_enabled is True from the database, and writes one LiveSignal
+#   row per region.  Adding a new region to the `regions` table automatically
+#   means it starts getting live-polled — no code change required.
+#
 # DATA SOURCES (§3, data_sources.md §B):
 #   Rainfall:  OpenWeatherMap Current Weather API
 #              https://api.openweathermap.org/data/2.5/weather
@@ -15,7 +22,7 @@
 #     • If no cached value exists, a zero-signal fallback is used.
 #     • The Data Health Badge reads data_is_cached from zone_scores to surface this.
 #
-# The scheduler is started in main.py lifespan (Step 13 of build order).
+# The scheduler is started in main.py lifespan.
 # This module only defines the job functions + the start/stop helpers.
 # ============================================================================
 
@@ -26,111 +33,111 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
-import httpx                    # already in requirements.txt (FastAPI dep)
+import httpx
 from sqlalchemy.orm import Session
 
-from models import LiveSignal, SignalType, engine
+from models import LiveSignal, SignalType, Region, engine
 
 log = logging.getLogger(__name__)
 
 # ============================================================================
-# Configuration (from environment; sane defaults for demo)
+# Global (non-region-specific) configuration
 # ============================================================================
 
-OWM_API_KEY:    str   = os.getenv("OPENWEATHER_API_KEY") or os.getenv("OWM_API_KEY", "")
-OWM_LAT:        float = float(os.getenv("OWM_LAT",  "26.960"))   # Assam (Majuli/Brahmaputra corridor)
-OWM_LON:        float = float(os.getenv("OWM_LON",  "94.220"))
-OWM_REGION:     str   = os.getenv("OWM_REGION",  "Assam")
-
-USGS_LAT:       float = float(os.getenv("USGS_LAT",   "26.500"))
-USGS_LON:       float = float(os.getenv("USGS_LON",   "93.500"))
-USGS_RADIUS_KM: float = float(os.getenv("USGS_RADIUS_KM", "350"))
-USGS_MIN_MAG:   float = float(os.getenv("USGS_MIN_MAG",   "2.0"))
-USGS_LOOKBACK_H: int  = int(os.getenv("USGS_LOOKBACK_H",  "24"))
+OWM_API_KEY:     str   = os.getenv("OPENWEATHER_API_KEY") or os.getenv("OWM_API_KEY", "")
+USGS_RADIUS_KM:  float = float(os.getenv("USGS_RADIUS_KM", "350"))
+USGS_MIN_MAG:    float = float(os.getenv("USGS_MIN_MAG",   "2.0"))
+USGS_LOOKBACK_H: int   = int(os.getenv("USGS_LOOKBACK_H",  "24"))
 
 # Poll intervals (seconds)
-RAINFALL_POLL_INTERVAL_S: int = int(os.getenv("RAINFALL_POLL_INTERVAL_S",  "900"))  # 15 min
-SEISMIC_POLL_INTERVAL_S:  int = int(os.getenv("SEISMIC_POLL_INTERVAL_S",   "300"))  # 5 min
+RAINFALL_POLL_INTERVAL_S: int = int(os.getenv("RAINFALL_POLL_INTERVAL_S", "900"))  # 15 min
+SEISMIC_POLL_INTERVAL_S:  int = int(os.getenv("SEISMIC_POLL_INTERVAL_S",  "300"))  # 5 min
 
 HTTP_TIMEOUT_S: float = 10.0
 
 
 # ============================================================================
-# Rainfall poller — OpenWeatherMap
+# Per-region rainfall fetch — OpenWeatherMap
 # ============================================================================
 
-def fetch_rainfall_owm() -> Optional[float]:
+def fetch_rainfall_for_region(region: Region) -> Optional[float]:
     """
-    Fetches current rainfall intensity (mm/hr) from OpenWeatherMap.
+    Fetches current rainfall (mm/hr) from OpenWeatherMap for one region.
+    Uses the region's center_lat/center_lon — no hardcoded coordinates.
     Returns None if the API key is absent or the request fails.
-
-    OWM returns rain in "rain.1h" (mm in last 1 hour).
-    We treat this as mm/hr for the hazard engine trigger multiplier.
     """
     if not OWM_API_KEY:
-        log.debug("OWM_API_KEY not set — skipping live rainfall fetch")
+        log.debug("OWM_API_KEY not set — skipping live rainfall fetch for %s", region.name)
         return None
 
     url = (
         f"https://api.openweathermap.org/data/2.5/weather"
-        f"?lat={OWM_LAT}&lon={OWM_LON}&appid={OWM_API_KEY}&units=metric"
+        f"?lat={region.center_lat}&lon={region.center_lon}"
+        f"&appid={OWM_API_KEY}&units=metric"
     )
     try:
         resp = httpx.get(url, timeout=HTTP_TIMEOUT_S)
         resp.raise_for_status()
         data = resp.json()
-        # "rain" key only present if it's actually raining
         rain_mm = data.get("rain", {}).get("1h", 0.0)
-        log.info("OWM: rainfall=%.2f mm/hr at %s", rain_mm, OWM_REGION)
+        log.info("OWM [%s]: rainfall=%.2f mm/hr", region.name, rain_mm)
         return float(rain_mm)
     except Exception as exc:
-        log.warning("OWM fetch failed: %s", exc)
+        log.warning("OWM fetch failed for region %s: %s", region.name, exc)
         return None
 
 
-def poll_rainfall(raw_response: Optional[dict] = None) -> None:
+def poll_rainfall_all_regions() -> None:
     """
-    APScheduler job: fetch rainfall, write to live_signals.
-    Falls back to last cached value if fetch fails.
+    APScheduler job: for each region with owm_poll_enabled=True, fetch
+    rainfall and write a LiveSignal row. Automatically covers all regions
+    present in the database — no code change needed when a region is added.
     """
-    value = fetch_rainfall_owm()
-    is_cached = False
-
     with Session(engine) as db:
-        if value is None:
-            # Use last cached value
-            last = (
-                db.query(LiveSignal)
-                .filter(LiveSignal.signal_type == SignalType.rainfall,
-                        LiveSignal.region == OWM_REGION)
-                .order_by(LiveSignal.fetched_at.desc())
-                .first()
-            )
-            value     = float(last.value) if last else 0.0
-            is_cached = True
-            log.info("Rainfall: using cached value=%.2f mm/hr", value)
-
-        signal = LiveSignal(
-            signal_type=SignalType.rainfall,
-            value=value,
-            region=OWM_REGION,
-            fetched_at=datetime.utcnow(),
-            is_cached=is_cached,
-            raw_response=raw_response,
+        regions = (
+            db.query(Region)
+            .filter(Region.owm_poll_enabled == True,
+                    Region.data_status.in_(["ACTIVE", "PILOT"]))
+            .all()
         )
-        db.add(signal)
+
+        for region in regions:
+            value = fetch_rainfall_for_region(region)
+            is_cached = False
+
+            if value is None:
+                last = (
+                    db.query(LiveSignal)
+                    .filter(LiveSignal.signal_type == SignalType.rainfall,
+                            LiveSignal.region == region.name)
+                    .order_by(LiveSignal.fetched_at.desc())
+                    .first()
+                )
+                value     = float(last.value) if last else 0.0
+                is_cached = True
+                log.info("[%s] Rainfall: using cached value=%.2f mm/hr", region.name, value)
+
+            signal = LiveSignal(
+                signal_type=SignalType.rainfall,
+                value=value,
+                region=region.name,
+                fetched_at=datetime.utcnow(),
+                is_cached=is_cached,
+            )
+            db.add(signal)
+
         db.commit()
-        log.debug("Stored rainfall signal: %.2f mm/hr (cached=%s)", value, is_cached)
 
 
 # ============================================================================
-# Seismic poller — USGS Earthquake Hazards API
+# Per-region seismic fetch — USGS Earthquake Hazards API
 # ============================================================================
 
-def fetch_seismic_usgs() -> Optional[float]:
+def fetch_seismic_for_region(region: Region) -> Optional[float]:
     """
     Fetches the maximum earthquake magnitude within USGS_RADIUS_KM of the
-    pilot region in the last USGS_LOOKBACK_H hours.
+    region's center in the last USGS_LOOKBACK_H hours.
+    Uses region.center_lat / region.center_lon — no hardcoded coordinates.
 
     USGS GeoJSON feed — no API key required (REAL data source).
     Returns 0.0 if no earthquakes found; None on network failure.
@@ -142,7 +149,7 @@ def fetch_seismic_usgs() -> Optional[float]:
         f"https://earthquake.usgs.gov/fdsnws/event/1/query"
         f"?format=geojson"
         f"&starttime={start_time}"
-        f"&latitude={USGS_LAT}&longitude={USGS_LON}"
+        f"&latitude={region.center_lat}&longitude={region.center_lon}"
         f"&maxradiuskm={USGS_RADIUS_KM}"
         f"&minmagnitude={USGS_MIN_MAG}"
         f"&orderby=magnitude"
@@ -153,46 +160,56 @@ def fetch_seismic_usgs() -> Optional[float]:
         data = resp.json()
         features = data.get("features", [])
         if not features:
-            log.info("USGS: no earthquakes ≥ M%.1f in last %dh", USGS_MIN_MAG, USGS_LOOKBACK_H)
+            log.info("USGS [%s]: no earthquakes ≥ M%.1f in last %dh",
+                     region.name, USGS_MIN_MAG, USGS_LOOKBACK_H)
             return 0.0
         max_mag = max(f["properties"]["mag"] for f in features if f["properties"]["mag"])
-        log.info("USGS: max earthquake M%.1f in last %dh within %d km",
-                 max_mag, USGS_LOOKBACK_H, USGS_RADIUS_KM)
+        log.info("USGS [%s]: max earthquake M%.1f in last %dh within %d km",
+                 region.name, max_mag, USGS_LOOKBACK_H, USGS_RADIUS_KM)
         return float(max_mag)
     except Exception as exc:
-        log.warning("USGS fetch failed: %s", exc)
+        log.warning("USGS fetch failed for region %s: %s", region.name, exc)
         return None
 
 
-def poll_seismic() -> None:
+def poll_seismic_all_regions() -> None:
     """
-    APScheduler job: fetch seismic magnitude, write to live_signals.
+    APScheduler job: for each region with usgs_poll_enabled=True, fetch
+    seismic magnitude and write a LiveSignal row.
     """
-    value = fetch_seismic_usgs()
-    is_cached = False
-
     with Session(engine) as db:
-        if value is None:
-            last = (
-                db.query(LiveSignal)
-                .filter(LiveSignal.signal_type == SignalType.seismic,
-                        LiveSignal.region == OWM_REGION)
-                .order_by(LiveSignal.fetched_at.desc())
-                .first()
-            )
-            value     = float(last.value) if last else 0.0
-            is_cached = True
-
-        signal = LiveSignal(
-            signal_type=SignalType.seismic,
-            value=value,
-            region=OWM_REGION,
-            fetched_at=datetime.utcnow(),
-            is_cached=is_cached,
+        regions = (
+            db.query(Region)
+            .filter(Region.usgs_poll_enabled == True,
+                    Region.data_status.in_(["ACTIVE", "PILOT"]))
+            .all()
         )
-        db.add(signal)
+
+        for region in regions:
+            value = fetch_seismic_for_region(region)
+            is_cached = False
+
+            if value is None:
+                last = (
+                    db.query(LiveSignal)
+                    .filter(LiveSignal.signal_type == SignalType.seismic,
+                            LiveSignal.region == region.name)
+                    .order_by(LiveSignal.fetched_at.desc())
+                    .first()
+                )
+                value     = float(last.value) if last else 0.0
+                is_cached = True
+
+            signal = LiveSignal(
+                signal_type=SignalType.seismic,
+                value=value,
+                region=region.name,
+                fetched_at=datetime.utcnow(),
+                is_cached=is_cached,
+            )
+            db.add(signal)
+
         db.commit()
-        log.debug("Stored seismic signal: M%.1f (cached=%s)", value, is_cached)
 
 
 # ============================================================================
@@ -202,6 +219,8 @@ def poll_seismic() -> None:
 def start_scheduler():
     """
     Starts APScheduler with the rainfall and seismic jobs.
+    Both jobs iterate all active regions from the database at each cycle —
+    no region-specific configuration needed here.
     Returns the running scheduler instance so main.py can stop it on shutdown.
     """
     try:
@@ -212,16 +231,16 @@ def start_scheduler():
 
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
-        poll_rainfall,
+        poll_rainfall_all_regions,
         trigger="interval",
         seconds=RAINFALL_POLL_INTERVAL_S,
         id="rainfall_poller",
         max_instances=1,
         replace_existing=True,
-        next_run_time=datetime.utcnow(),   # run immediately on start
+        next_run_time=datetime.utcnow(),
     )
     scheduler.add_job(
-        poll_seismic,
+        poll_seismic_all_regions,
         trigger="interval",
         seconds=SEISMIC_POLL_INTERVAL_S,
         id="seismic_poller",
@@ -229,9 +248,17 @@ def start_scheduler():
         replace_existing=True,
         next_run_time=datetime.utcnow(),
     )
+    # Register §2.4 dynamic hazard detection job
+    try:
+        from ingestion.dynamic_hazard_zones import register_dynamic_hazard_job
+        register_dynamic_hazard_job(scheduler)
+    except Exception as exc:
+        log.warning("Could not register dynamic hazard job: %s", exc)
+
     scheduler.start()
     log.info(
-        "APScheduler started: rainfall every %ds, seismic every %ds",
+        "APScheduler started: rainfall every %ds, seismic every %ds, "
+        "dynamic hazard check registered (all active regions)",
         RAINFALL_POLL_INTERVAL_S, SEISMIC_POLL_INTERVAL_S,
     )
     return scheduler
@@ -249,39 +276,71 @@ def stop_scheduler(scheduler) -> None:
 
 def get_signal_health(db: Session) -> dict:
     """
-    Returns the freshness of the latest rainfall and seismic signals.
-    Used by the Data Health Badge (§11).
+    Returns the freshness of the latest rainfall and seismic signals,
+    broken down by region.  Used by the Data Health Badge (§11).
     """
-    def _latest(signal_type: SignalType) -> Optional[LiveSignal]:
+    def _latest_per_type(signal_type: SignalType, region_name: str) -> Optional[LiveSignal]:
         return (
             db.query(LiveSignal)
-            .filter(LiveSignal.signal_type == signal_type)
+            .filter(LiveSignal.signal_type == signal_type,
+                    LiveSignal.region == region_name)
             .order_by(LiveSignal.fetched_at.desc())
             .first()
         )
 
-    rain = _latest(SignalType.rainfall)
-    seis = _latest(SignalType.seismic)
-    now  = datetime.utcnow()
+    regions = (
+        db.query(Region)
+        .filter(Region.data_status.in_(["ACTIVE", "PILOT"]))
+        .all()
+    )
+    now = datetime.utcnow()
 
     def _age_minutes(sig) -> Optional[float]:
         if not sig:
             return None
         return round((now - sig.fetched_at).total_seconds() / 60, 1)
 
-    return {
-        "rainfall": {
-            "value_mm_per_hr": float(rain.value) if rain else None,
-            "fetched_at":      rain.fetched_at.isoformat() + "Z" if rain else None,
-            "age_minutes":     _age_minutes(rain),
-            "is_cached":       rain.is_cached if rain else True,
-            "status":          "ok" if rain and not rain.is_cached else "cached",
-        },
-        "seismic": {
-            "value_magnitude": float(seis.value) if seis else None,
-            "fetched_at":      seis.fetched_at.isoformat() + "Z" if seis else None,
-            "age_minutes":     _age_minutes(seis),
-            "is_cached":       seis.is_cached if seis else True,
-            "status":          "ok" if seis and not seis.is_cached else "cached",
-        },
+    result = {}
+    for r in regions:
+        rain = _latest_per_type(SignalType.rainfall, r.name)
+        seis = _latest_per_type(SignalType.seismic, r.name)
+        result[r.name] = {
+            "rainfall": {
+                "value_mm_per_hr": float(rain.value) if rain else None,
+                "fetched_at":      rain.fetched_at.isoformat() + "Z" if rain else None,
+                "age_minutes":     _age_minutes(rain),
+                "is_cached":       rain.is_cached if rain else True,
+                "status":          "ok" if rain and not rain.is_cached else "cached",
+            },
+            "seismic": {
+                "value_magnitude": float(seis.value) if seis else None,
+                "fetched_at":      seis.fetched_at.isoformat() + "Z" if seis else None,
+                "age_minutes":     _age_minutes(seis),
+                "is_cached":       seis.is_cached if seis else True,
+                "status":          "ok" if seis and not seis.is_cached else "cached",
+            },
+        }
+
+    primary_data = next(iter(result.values()), None) if result else None
+    top_rainfall = primary_data["rainfall"] if primary_data else {
+        "value_mm_per_hr": None,
+        "fetched_at": None,
+        "age_minutes": None,
+        "is_cached": True,
+        "status": "cached",
     }
+    top_seismic = primary_data["seismic"] if primary_data else {
+        "value_magnitude": None,
+        "fetched_at": None,
+        "age_minutes": None,
+        "is_cached": True,
+        "status": "cached",
+    }
+
+    return {
+        "rainfall": top_rainfall,
+        "seismic":  top_seismic,
+        "regions":  result,
+        **result,
+    }
+

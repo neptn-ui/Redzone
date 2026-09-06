@@ -17,7 +17,7 @@ from typing import Optional, Any
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
-from models import Habitation, CandidateSite, ZoneScore, LiveSignal, get_db
+from models import Habitation, CandidateSite, ZoneScore, LiveSignal, Region, get_db
 from api.zones import list_zones
 
 log = logging.getLogger(__name__)
@@ -36,8 +36,16 @@ def export_report(db: Session = Depends(get_db)):
     Each section is independently fault-tolerant — a failure in one section
     returns DATA_UNAVAILABLE for that section instead of a 500.
     """
-    import os
-    pilot_district = os.environ.get("PILOT_DISTRICT", "Multi-District — Configurable")
+    # Active regions from DB — not from hardcoded env vars
+    try:
+        active_regions = (
+            db.query(Region)
+            .filter(Region.data_status.in_(["ACTIVE", "PILOT"]))
+            .all()
+        )
+        region_names = ", ".join(r.name for r in active_regions) or "(no regions loaded)"
+    except Exception:
+        region_names = "(unavailable)"
 
     # ── Zones ────────────────────────────────────────────────────────────────
     zones = []
@@ -65,12 +73,8 @@ def export_report(db: Session = Depends(get_db)):
                 "slope_degrees":            s.slope_degrees,
                 "distance_to_road_km":      s.distance_to_road_km,
                 "data_source":              s.data_source,
+                "hazard_free":              s.hazard_free,
             }
-            # Optional column — not all deployments have it
-            try:
-                entry["distance_from_hazard_source_km"] = getattr(s, "distance_from_joshimath_km", None)
-            except Exception:
-                pass
             sites_export.append(entry)
     except Exception as exc:
         sites_error = str(exc)
@@ -102,14 +106,18 @@ def export_report(db: Session = Depends(get_db)):
     try:
         priority_queue = [
             {
-                "rank":           i + 1,
-                "habitation":     z.name,
-                "population":     z.population,
-                "hazard_score":   z.hazard_score,
-                "urgency_score":  z.urgency_score,
-                "classification": z.classification,
-                "timeline":       z.timeline,
-                "matched_site":   z.matched_site,
+                "rank":               i + 1,
+                "habitation":         z.name,
+                "district":           z.district,
+                "region_name":        z.region_name,
+                "population":         z.population,
+                "hazard_score":       z.hazard_score,
+                "urgency_score":      z.urgency_score,
+                "classification":     z.classification,
+                "relocation_horizon": z.relocation_horizon,
+                "timeline":           z.timeline,
+                "matched_site":       z.matched_site,
+                "terrain_data_status": z.terrain_data_status,
             }
             for i, z in enumerate(
                 sorted(zones, key=lambda z: z.urgency_score, reverse=True)
@@ -121,7 +129,7 @@ def export_report(db: Session = Depends(get_db)):
     return {
         "report_metadata": {
             "title":          "REDZONE Emergency Command Platform — Situation Report",
-            "pilot_district": pilot_district,
+            "active_regions": region_names,
             "generated_at":   datetime.now(timezone.utc).isoformat(),
             "version":        "2.0.0",
         },

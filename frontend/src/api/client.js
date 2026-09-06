@@ -15,7 +15,7 @@ const BASE = '/api'
 
 async function request(path, options = {}) {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 15000) // 15s timeout
+  const timeoutId = setTimeout(() => controller.abort(), 45000) // 45s timeout
 
   try {
     const res = await fetch(`${BASE}${path}`, {
@@ -76,6 +76,9 @@ export const api = {
   recommendations: (params = {}) =>
     request(`/recommendations${buildQuery(params)}`),
 
+  recommendationSynthesis: (params = {}) =>
+    request(`/recommendations/synthesis${buildQuery(params)}`),
+
   // ── Scenario ─────────────────────────────────────────────────────────────
   whatIf: (body) =>
     request('/scenario/what-if', { method: 'POST', body: JSON.stringify(body) }),
@@ -88,9 +91,9 @@ export const api = {
   dataHealth: () =>
     request('/data-health'),
 
-  // ── Area context (NEW — returns geographic metadata for a location) ────────
-  areaContext: (lat, lon) =>
-    request(`/areas/context${buildQuery({ lat, lon })}`),
+  // ── Area context (Canonical AreaContext resolution) ────────
+  areaContext: (lat, lon, radiusKm = 100, extra = {}) =>
+    request(`/areas/context${buildQuery({ lat, lon, radius_km: radiusKm, ...extra })}`),
 
   // ── Events catalog (NEW) ──────────────────────────────────────────────────
   events: (params = {}) =>
@@ -98,4 +101,24 @@ export const api = {
 
   event: (id) =>
     request(`/events/${id}`),
+
+  replayEvent: (id, params = {}) =>
+    request(`/events/${id}/replay${buildQuery(params)}`),
+
+  eventsCoverage: (params = {}) =>
+    request(`/events/coverage${buildQuery(params)}`),
+
+  eventsCurrency: () =>
+    request('/events/currency'),
+
+  createEvent: (body) =>
+    request('/events', { method: 'POST', body: JSON.stringify(body) }),
+
+  // ── Human Decisions (§6.3) ────────────────────────────────────────────────
+  recordDecision: (body) =>
+    request('/recommendations/decision', { method: 'POST', body: JSON.stringify(body) }),
+
+  decisions: (params = {}) =>
+    request(`/recommendations/decisions${buildQuery(params)}`),
 }
+

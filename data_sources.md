@@ -1,5 +1,5 @@
 # data_sources.md — Pilot Dataset Field Registry
-## SIH26191 · Risk-Aware Relocation Platform · Pilot District: Chamoli, Uttarakhand
+## SIH26191 · REDZONE — General-Purpose Multi-Hazard Relocation Engine
 
 > **How to read this file:**  
 > Every field used in the platform's scoring, map, or audit trail has exactly  
@@ -15,7 +15,39 @@
 
 ---
 
+## §0 — Platform Architecture: Region-Agnostic by Design
+
+REDZONE is a **general-purpose, region-agnostic engine**. Pilot datasets are  
+loaded into the `regions` DB table and are processed identically by the same  
+engines regardless of geography. This file documents all data sources for all  
+currently loaded pilot regions.
+
+| Pilot Region | Hazards | Status |
+|---|---|---|
+| **Assam Multi-District** (Majuli, Dhemaji, Cachar) | Flood, Coastal Erosion | PILOT |
+| **Chamoli, Uttarakhand** | Landslide, Subsidence, Flash Flood | PILOT |
+
+Data in each pilot region section is tagged REAL or SYNTH per the rules above.  
+Adding a new region requires only a new seed script following  
+`backend/ingestion/TEMPLATE_load_region_pilot_data.py` — no core engine changes.
+
+---
+
 ## Part A — District-Level Facts
+
+### A.1 — Assam Multi-District Pilot
+
+| Field | Value | Source Type | Source / Citation |
+|---|---|---|---|
+| Pilot districts | Majuli, Dhemaji, Cachar | REAL | ASDMA (Assam State Disaster Management Authority) hazard district list |
+| State | Assam | REAL | — |
+| Region bounding center | 26.4°N, 92.6°E | SYNTH | Geographic centroid of three-district bounding box (OSM) |
+| Brahmaputra flood peak months | June–August | REAL | ASDMA Annual Report 2022; Brahmaputra Board |
+| Barak valley flood peak months | June–July | REAL | ASDMA |
+| Habitations seeded | 18 (across 3 districts) | SYNTH-NAME (real places, population REAL via Census 2011) | Census 2011 village/ward lists |
+| Coastal erosion source | Brahmaputra Board Salmora / Ahotguri | REAL | Brahmaputra Board Reports on River Erosion, 2019-22 |
+
+### A.2 — Chamoli, Uttarakhand Pilot
 
 | Field | Value | Source Type | Source / Citation |
 |---|---|---|---|
@@ -30,10 +62,6 @@
 ---
 
 ## Part B — Habitations in the Pilot Dataset
-
-The platform seeds **12 habitations** covering the highest-risk and reference-stable  
-locations in Chamoli. All are real place names. Population figures are real (Census 2011)  
-where available; synthetic-fallback values are flagged.
 
 ### B.1 — Joshimath (Urban Ward Cluster)
 

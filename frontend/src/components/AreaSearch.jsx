@@ -104,16 +104,23 @@ export default function AreaSearch({ onClose }) {
     setSelecting(true)
     setCoverageMsg(null)
 
-    // Always set area immediately so map flies regardless of backend coverage
+    // Always set area immediately as canonical AreaContext (§0.1)
     const area = {
+      display_name: result.displayName || result.name,
       name:     result.name,
       lat:      result.lat,
       lon:      result.lon,
+      lng:      result.lon,
       zoom:     result.zoom ?? 11,
+      bounding_box: result.bbox,
       bbox:     result.bbox,
-      state:    result.state,
-      country:  result.country,
-      district: result.district,
+      state:    result.state ?? null,
+      country:  result.country ?? null,
+      district: result.district ?? null,
+      resolution_source: 'Nominatim / OpenStreetMap',
+      matched_region_id: null,
+      matched_region_name: null,
+      is_seeded: false,
       osmId:    result.osmId,
       osmType:  result.osmType,
     }
@@ -126,16 +133,24 @@ export default function AreaSearch({ onClose }) {
     onClose()
     navigate('/')
 
-    // Check coverage in background (informational only — does NOT block)
+    // Check coverage in background (§0.3: no region fallback ever)
     try {
-      const ctx = await api.areaContext(result.lat, result.lon)
-      if (ctx.data_status !== 'REAL') {
-        // Coverage info stored but doesn't block navigation
-        // The pages themselves will show DATA UNAVAILABLE where appropriate
-        console.info('[AreaSearch] Coverage:', ctx.data_status, ctx.coverage_note)
+      const ctx = await api.areaContext(result.lat, result.lon, 100, {
+        display_name: result.displayName,
+        country: result.country,
+        state: result.state,
+        district: result.district,
+      })
+      if (ctx.matched_region_id) {
+        setArea({
+          ...area,
+          matched_region_id: ctx.matched_region_id,
+          matched_region_name: ctx.matched_region_name,
+          is_seeded: true,
+        })
       }
     } catch {
-      // Backend unavailable — location is still valid, proceed normally
+      // Backend unavailable — location remains valid
     }
 
     setSelecting(false)

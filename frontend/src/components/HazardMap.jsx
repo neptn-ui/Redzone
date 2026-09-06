@@ -122,20 +122,29 @@ export default function HazardMap({
   sites    = [],
   route    = null,
   onZoneSelect = null,
+  event    = null,
+  activeTimestamp = null,
+  simulatedHazardGeometry = null,
+  isSimulationMode = false,
 }) {
   const containerRef = useRef(null)
   const mapRef       = useRef(null)
   const prevAreaRef  = useRef(null)
 
   // Layer group refs — each cleared before new hazard renders
-  const hazardGroupRef  = useRef(null)
-  const settlementGrpRef= useRef(null)
-  const siteGrpRef      = useRef(null)
-  const routeGrpRef     = useRef(null)
+  const hazardGroupRef    = useRef(null)
+  const settlementGrpRef  = useRef(null)
+  const siteGrpRef        = useRef(null)
+  const routeGrpRef       = useRef(null)
+  const eventImpactGrpRef = useRef(null)
+  const simulatedGrpRef   = useRef(null)
 
-  const { area, activeLayers, hazard, setHazard, setSelectedFeature } = useAppStore()
+  const { area, activeLayers, hazard, setHazard, setSelectedFeature, historicalEvent, historicalTimestamp } = useAppStore()
 
-  const [activeHazard, setActiveHazard] = useState(hazard?.type ?? null)
+  const currentEvent = event || historicalEvent
+  const currentTimestamp = activeTimestamp || historicalTimestamp
+
+  const [activeHazard, setActiveHazard] = useState(currentEvent?.hazard_type ?? hazard?.type ?? null)
   const [osmData,      setOsmData]      = useState({ rivers: [], roads: [], bridges: [], infra: [], earthquakes: null })
   const leafletRef     = useRef(null)     // the actual L instance
   const [mapReady, setMapReady] = useState(false)  // triggers hazard re-render
@@ -145,8 +154,12 @@ export default function HazardMap({
 
   // Sync external hazard state (e.g. from Historical Replay or Scenario Lab) to local map state
   useEffect(() => {
-    setActiveHazard(hazard?.type ?? null)
-  }, [hazard?.type])
+    if (currentEvent?.hazard_type) {
+      setActiveHazard(currentEvent.hazard_type)
+    } else {
+      setActiveHazard(hazard?.type ?? null)
+    }
+  }, [hazard?.type, currentEvent?.hazard_type])
 
   // ── Init Leaflet ──────────────────────────────────────────────────────────
 
@@ -236,11 +249,21 @@ export default function HazardMap({
     }
   }, [])
 
-  // ── Fly to area ───────────────────────────────────────────────────────────
+  // ── Fly to area or event ──────────────────────────────────────────────────
 
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !area) return
+    if (!map) return
+
+    if (currentEvent?.lat && currentEvent?.lon) {
+      const eventKey = `event_${currentEvent.event_id || currentEvent.name}_${currentEvent.lat}_${currentEvent.lon}`
+      if (prevAreaRef.current === eventKey) return
+      prevAreaRef.current = eventKey
+      map.flyTo([currentEvent.lat, currentEvent.lon], currentEvent.zoom ?? 10, { duration: 1.4 })
+      return
+    }
+
+    if (!area) return
     const key = `${area.lat},${area.lon}`
     if (prevAreaRef.current === key) return
     prevAreaRef.current = key
@@ -255,19 +278,23 @@ export default function HazardMap({
       } catch {}
     }
     map.flyTo([area.lat, area.lon], area.zoom ?? 11, { duration: 1.2 })
-  }, [area])
+  }, [area, currentEvent?.event_id, currentEvent?.lat, currentEvent?.lon])
 
-  // ── Load OSM data when area changes ──────────────────────────────────────
+  // ── Load OSM data when area or event changes ──────────────────────────────
   const prevOsmAreaRef = useRef(null)
 
   useEffect(() => {
-    if (!area?.lat || !area?.lon) {
+    const effLat = currentEvent?.lat ?? area?.lat
+    const effLon = currentEvent?.lon ?? area?.lon
+    const effZoom = currentEvent?.zoom ?? area?.zoom ?? 10
+
+    if (!effLat || !effLon) {
       setOsmData({ rivers: [], roads: [], bridges: [], infra: [], earthquakes: null })
       setOsmLoading(false)
       return
     }
 
-    const areaKey = `${Number(area.lat).toFixed(3)},${Number(area.lon).toFixed(3)}`
+    const areaKey = `${Number(effLat).toFixed(3)},${Number(effLon).toFixed(3)}`
     if (prevOsmAreaRef.current === areaKey) {
       return
     }
@@ -282,14 +309,14 @@ export default function HazardMap({
       if (isCurrent) setOsmLoading(false)
     }, 4500)
 
-    const radius = (area.zoom ?? 11) >= 12 ? 15000 : (area.zoom ?? 11) >= 10 ? 30000 : 45000
+    const radius = effZoom >= 12 ? 15000 : effZoom >= 10 ? 30000 : 45000
 
     Promise.allSettled([
-      fetchRivers(area.lat, area.lon, radius),
-      fetchMajorRoads(area.lat, area.lon, radius * 0.6),
-      fetchBridges(area.lat, area.lon, radius),
-      fetchInfrastructure(area.lat, area.lon, radius * 0.5),
-      fetchRecentEarthquakes(area.lat, area.lon, 300),
+      fetchRivers(effLat, effLon, radius),
+      fetchMajorRoads(effLat, effLon, radius * 0.6),
+      fetchBridges(effLat, effLon, radius),
+      fetchInfrastructure(effLat, effLon, radius * 0.5),
+      fetchRecentEarthquakes(effLat, effLon, 300),
     ]).then(([rv, rd, br, inf, eq]) => {
       if (!isCurrent) return
       setOsmData({
@@ -313,7 +340,7 @@ export default function HazardMap({
       isCurrent = false
       clearTimeout(safetyTimer)
     }
-  }, [area?.lat, area?.lon, area?.zoom])
+  }, [area?.lat, area?.lon, area?.zoom, currentEvent?.lat, currentEvent?.lon])
 
   // ── Render hazard layers when hazard or OSM data changes ─────────────────
 
@@ -447,6 +474,178 @@ export default function HazardMap({
     try { map.fitBounds(_L.polyline(route.coordinates).getBounds(), { padding: [60, 60] }) } catch {}
   }, [route, activeLayers.routes])
 
+  // ── Event Impact Layer (Beacon, Inundation Extent, Hotspots) ─────────────
+  useEffect(() => {
+    const map = mapRef.current
+    const L = leafletRef.current
+    if (!map || !L || !mapReady) return
+
+    if (eventImpactGrpRef.current) {
+      eventImpactGrpRef.current.remove()
+      eventImpactGrpRef.current = null
+    }
+
+    if (!currentEvent || !currentEvent.lat || !currentEvent.lon) return
+
+    const grp = L.layerGroup()
+    const hazardColor = currentEvent.hazard_type === 'flood' ? '#3b82f6'
+      : currentEvent.hazard_type === 'erosion' ? '#f97316'
+      : currentEvent.hazard_type === 'landslide' ? '#d97706'
+      : '#ef4444'
+
+    // 1. Epicenter Beacon Marker
+    const beaconIcon = L.divIcon({
+      html: `
+        <div style="position:relative;width:44px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer;">
+          <div style="position:absolute;width:44px;height:44px;border-radius:50%;background:${hazardColor};opacity:0.35;animation:epi-pulse 2s infinite ease-out;"></div>
+          <div style="position:absolute;width:26px;height:26px;border-radius:50%;background:${hazardColor};opacity:0.6;animation:epi-pulse 2s 0.6s infinite ease-out;"></div>
+          <div style="position:relative;width:16px;height:16px;border-radius:50%;background:#ffffff;border:3px solid ${hazardColor};box-shadow:0 0 12px ${hazardColor};"></div>
+        </div>`,
+      iconSize: [44, 44],
+      iconAnchor: [22, 22],
+      className: '',
+    })
+
+    const beaconPopup = `
+      <div style="font-family:'Outfit',system-ui,sans-serif;min-width:240px;padding:2px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+          <span style="font-size:9px;font-weight:800;color:${hazardColor};text-transform:uppercase;letter-spacing:.08em;">${currentEvent.hazard_type?.toUpperCase()} FOCAL CENTER</span>
+          <span style="font-size:8px;font-weight:700;color:#f59e0b;padding:1px 5px;border:1px solid rgba(245,158,11,0.3);border-radius:3px;">${currentEvent.data_status || 'HISTORICAL'}</span>
+        </div>
+        <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:4px;">${currentEvent.name}</div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;line-height:1.4;">${currentEvent.description || ''}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;background:rgba(255,255,255,0.04);padding:6px;border-radius:6px;">
+          <div>
+            <div style="font-size:8px;color:#64748b;font-weight:700;">SEVERITY</div>
+            <div style="font-size:13px;font-weight:800;color:#ef4444;">${currentEvent.severity?.toUpperCase() || 'HIGH'}</div>
+          </div>
+          <div>
+            <div style="font-size:8px;color:#64748b;font-weight:700;">AFFECTED</div>
+            <div style="font-size:13px;font-weight:800;color:#f1f5f9;">${currentEvent.affected_pop ? (currentEvent.affected_pop / 1000).toFixed(0) + 'K' : '—'}</div>
+          </div>
+        </div>
+      </div>`
+
+    L.marker([currentEvent.lat, currentEvent.lon], { icon: beaconIcon })
+      .bindPopup(beaconPopup, { maxWidth: 280, className: 'rz-popup' })
+      .addTo(grp)
+
+    // 2. Inundation & Impact Reach Rings
+    L.circle([currentEvent.lat, currentEvent.lon], {
+      radius: 35000,
+      color: hazardColor,
+      weight: 1.5,
+      dashArray: '6, 8',
+      fillColor: hazardColor,
+      fillOpacity: 0.06,
+    }).bindTooltip(`DOCUMENTED IMPACT REACH (~35 km) — ${currentEvent.affected_pop ? (currentEvent.affected_pop / 1000).toFixed(0) + 'K affected' : ''}`, { sticky: true }).addTo(grp)
+
+    L.circle([currentEvent.lat, currentEvent.lon], {
+      radius: 14000,
+      color: hazardColor,
+      weight: 2,
+      fillColor: hazardColor,
+      fillOpacity: 0.16,
+    }).bindTooltip(`SEVERE IMPACT CORE — High Inundation Depth`, { sticky: true }).addTo(grp)
+
+    // 3. Impact Hotspots
+    const hotspots = currentEvent.impact_hotspots || []
+    hotspots.forEach(hs => {
+      const isCurrentStage = hs.timestamp === currentTimestamp || (currentEvent.timeline && currentEvent.timeline[hs.stage_idx - 1]?.timestamp === currentTimestamp)
+      const hsBorder = isCurrentStage ? '#f59e0b' : hazardColor
+      const hsGlow = isCurrentStage ? '0 0 10px #f59e0b' : '0 2px 8px rgba(0,0,0,0.6)'
+
+      const hsIcon = L.divIcon({
+        html: `
+          <div style="display:flex;align-items:center;gap:6px;background:#0b0f1a;border:1.5px solid ${hsBorder};padding:4px 8px;border-radius:6px;box-shadow:${hsGlow};white-space:nowrap;cursor:pointer;">
+            <span style="width:7px;height:7px;border-radius:50%;background:${hsBorder};display:inline-block;${isCurrentStage ? 'box-shadow:0 0 6px #f59e0b;' : ''}"></span>
+            <span style="font-size:10px;font-weight:700;color:#f1f5f9;font-family:'Outfit',sans-serif;">${hs.name}</span>
+          </div>`,
+        iconSize: [120, 26],
+        iconAnchor: [60, 13],
+        className: '',
+      })
+
+      const hsPopup = `
+        <div style="font-family:'Outfit',system-ui,sans-serif;min-width:240px;padding:2px;">
+          <div style="font-size:9px;font-weight:800;color:${hazardColor};text-transform:uppercase;margin-bottom:2px;">${hs.type || 'GROUND INCIDENT'}</div>
+          <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:4px;">${hs.name}</div>
+          <div style="font-size:10px;color:#64748b;margin-bottom:6px;">District: ${hs.district || currentEvent.district || 'Assam'} · Recorded ${hs.timestamp || currentEvent.date_start}</div>
+          <div style="font-size:11px;color:#cbd5e1;line-height:1.45;margin-bottom:8px;">${hs.description}</div>
+          <div style="font-size:8px;font-weight:700;color:#f59e0b;padding:2px 6px;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.2);border-radius:4px;display:inline-block;">RECONSTRUCTED GROUND INCIDENT</div>
+        </div>`
+
+      L.marker([hs.lat, hs.lon], { icon: hsIcon })
+        .bindPopup(hsPopup, { maxWidth: 280, className: 'rz-popup' })
+        .addTo(grp)
+    })
+
+    grp.addTo(map)
+    eventImpactGrpRef.current = grp
+  }, [currentEvent, currentTimestamp, mapReady])
+
+  // ── Simulated Hazard Geometry Layer (Counterfactual Propagation §9.4) ──────
+  useEffect(() => {
+    const map = mapRef.current
+    const L = leafletRef.current
+    if (!map || !L || !mapReady) return
+
+    if (simulatedGrpRef.current) {
+      simulatedGrpRef.current.remove()
+      simulatedGrpRef.current = null
+    }
+
+    if (!isSimulationMode || !simulatedHazardGeometry?.features?.length) return
+
+    const simLayer = L.geoJSON(simulatedHazardGeometry, {
+      style: (feature) => {
+        const props = feature.properties || {}
+        const isBreach = props.hazard_type === 'dyke_breach'
+        return {
+          color: props.color || '#ef4444',
+          weight: isBreach ? 3 : 2,
+          dashArray: isBreach ? '5, 5' : undefined,
+          fillColor: props.color || '#ef4444',
+          fillOpacity: props.fill_opacity != null ? props.fill_opacity : 0.45,
+        }
+      },
+      onEachFeature: (feature, layer) => {
+        const p = feature.properties || {}
+        layer.bindPopup(`
+          <div style="font-family:'Outfit',system-ui,sans-serif;min-width:220px;padding:2px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+              <span style="font-size:9px;font-weight:800;color:${p.color || '#ef4444'};text-transform:uppercase;letter-spacing:.08em;">
+                SIMULATED INUNDATION EXTENT
+              </span>
+              <span style="font-size:8px;font-weight:700;color:#f59e0b;padding:1px 5px;border:1px solid rgba(245,158,11,0.3);border-radius:3px;">
+                COUNTERFACTUAL
+              </span>
+            </div>
+            <div style="font-size:12px;font-weight:700;color:#f1f5f9;margin-bottom:4px;">${p.name || 'Simulated Flood Extent'}</div>
+            <div style="font-size:10px;color:#94a3b8;margin-bottom:6px;">
+              Severity: <strong style="color:${p.color || '#ef4444'}">${p.inundation_severity || 'ELEVATED'}</strong>
+              ${p.surge_level_m != null ? ` · Surge: +${p.surge_level_m}m` : ''}
+              ${p.rainfall_mm_24h != null ? ` · Rain: ${p.rainfall_mm_24h}mm/24h` : ''}
+            </div>
+            <div style="font-size:8px;color:#cbd5e1;background:rgba(239,68,68,0.1);padding:4px;border-radius:4px;border:1px solid rgba(239,68,68,0.2);">
+              SPATIAL PROPAGATION: Habitations within this polygon are evaluated under elevated exposure.
+            </div>
+          </div>
+        `, { maxWidth: 280, className: 'rz-popup' })
+      }
+    })
+
+    simLayer.addTo(map)
+    simulatedGrpRef.current = simLayer
+
+    try {
+      const bounds = simLayer.getBounds()
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [40, 40], maxZoom: 13 })
+      }
+    } catch {}
+  }, [simulatedHazardGeometry, isSimulationMode, mapReady])
+
   // ── Handle hazard type switch ─────────────────────────────────────────────
 
   const handleHazardSwitch = useCallback((id) => {
@@ -500,6 +699,64 @@ export default function HazardMap({
       {osmError && !osmLoading && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-lg bg-[#0c101d] border border-amber-500/30 shadow-2xl">
           <span className="text-[9px] font-mono text-amber-400">{osmError}</span>
+        </div>
+      )}
+
+      {/* Historical Event Map HUD Overlay */}
+      {currentEvent && (
+        <div className="absolute top-4 left-4 z-20 max-w-sm bg-[#0c101d]/95 backdrop-blur-md border border-amber-500/40 rounded-xl p-3 shadow-2xl">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <span className="text-[9px] font-bold font-mono uppercase tracking-widest text-amber-400">
+                HISTORICAL REPLAY · {currentEvent.data_status || 'RECONSTRUCTED'}
+              </span>
+            </div>
+            <span className="text-[9px] font-mono font-bold text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded border border-red-500/20">
+              {currentEvent.severity?.toUpperCase()}
+            </span>
+          </div>
+          <div className="text-xs font-bold text-slate-100 mb-0.5 leading-tight">{currentEvent.name}</div>
+          <div className="text-[10px] text-slate-400 font-mono mb-2">{currentEvent.region}</div>
+          
+          {/* Active timeline stage info */}
+          {currentEvent.timeline && currentEvent.timeline.length > 0 && (() => {
+            const activeStage = currentEvent.timeline.find(s => s.timestamp === currentTimestamp) || currentEvent.timeline[0]
+            const stageIdx = currentEvent.timeline.findIndex(s => s.timestamp === (activeStage?.timestamp)) + 1
+            return (
+              <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg p-2 mt-1.5">
+                <div className="flex items-center justify-between text-[9px] font-mono mb-1">
+                  <span className="text-amber-400 font-bold">STAGE {stageIdx} OF {currentEvent.timeline.length}</span>
+                  <span className="text-slate-500">{activeStage?.timestamp}</span>
+                </div>
+                <div className="text-[11px] font-semibold text-slate-200 leading-snug">{activeStage?.label}</div>
+                <div className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">{activeStage?.description}</div>
+              </div>
+            )
+          })()}
+
+          <div className="text-[8px] text-slate-500 font-mono mt-2 flex items-center justify-between border-t border-white/[0.04] pt-1.5">
+            <span>● Click markers to inspect ground impact</span>
+            <span>{currentEvent.affected_pop ? `${(currentEvent.affected_pop / 1000).toFixed(0)}K exposed` : ''}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Simulation Lab Counterfactual HUD */}
+      {isSimulationMode && simulatedHazardGeometry?.features?.length > 0 && (
+        <div className="absolute top-4 right-4 z-20 max-w-xs bg-[#0c101d]/95 backdrop-blur-md border border-blue-500/40 rounded-xl p-3 shadow-2xl">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+              <span className="text-[9px] font-bold font-mono uppercase tracking-widest text-blue-400">
+                SIMULATION LAB · COUNTERFACTUAL
+              </span>
+            </div>
+          </div>
+          <div className="text-xs font-bold text-slate-100 mb-0.5 leading-tight">Simulated Inundation Extent Rendered</div>
+          <div className="text-[10px] text-slate-400 font-mono">
+            {simulatedHazardGeometry.severity || 'ACTIVE SCENARIO'} · {simulatedHazardGeometry.features.length} GeoJSON feature(s)
+          </div>
         </div>
       )}
 

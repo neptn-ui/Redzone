@@ -169,36 +169,90 @@ const initialState = {
   recentSearches: [],
 }
 
+// ─── Canonical AreaContext (§0.1, §0.5) ──────────────────────────────────────
+
+export function createAreaContext(raw) {
+  if (!raw) return null
+  const lat = parseFloat(raw.lat ?? raw.latitude ?? 0)
+  const lng = parseFloat(raw.lng ?? raw.lon ?? raw.longitude ?? 0)
+  const displayName = raw.display_name ?? raw.displayName ?? raw.name ?? 'Searched Location'
+  const country = raw.country ?? null
+  const state = raw.state ?? null
+  const district = raw.district ?? raw.county ?? null
+
+  return {
+    display_name: displayName,
+    name: raw.name ?? displayName.split(',')[0].trim(),
+    lat,
+    lng,
+    lon: lng, // alias for leaflet compatibility
+    bounding_box: raw.bounding_box ?? raw.bbox ?? null,
+    bbox: raw.bbox ?? raw.bounding_box ?? null,
+    country,
+    state,
+    district,
+    resolution_source: raw.resolution_source ?? 'Nominatim / OpenStreetMap',
+    matched_region_id: raw.matched_region_id ?? null,
+    matched_region_name: raw.matched_region_name ?? null,
+    is_seeded: Boolean(raw.is_seeded || raw.matched_region_id),
+    zoom: raw.zoom ?? 11,
+    osmId: raw.osmId ?? raw.osm_id ?? null,
+    osmType: raw.osmType ?? raw.osm_type ?? null,
+  }
+}
+
+export function formatAreaBreadcrumb(area) {
+  if (!area) return 'NO AREA SELECTED'
+  const parts = []
+  if (area.country) parts.push(area.country.trim())
+  if (area.state && area.state.trim().toLowerCase() !== area.country?.trim().toLowerCase()) {
+    parts.push(area.state.trim())
+  }
+  const local = (area.district || area.name || '').trim()
+  if (local &&
+      local.toLowerCase() !== area.country?.trim().toLowerCase() &&
+      local.toLowerCase() !== area.state?.trim().toLowerCase()) {
+    parts.push(local)
+  }
+  return parts.length > 0 ? parts.join(' / ').toUpperCase() : (area.display_name || '').toUpperCase()
+}
+
 // ─── Reducer ─────────────────────────────────────────────────────────────────
 
 function reducer(state, action) {
   switch (action.type) {
 
-    case 'SET_AREA':
+    case 'SET_AREA': {
+      const canonicalArea = createAreaContext(action.payload)
       return {
         ...state,
-        area: action.payload,
+        area: canonicalArea,
         areaStatus: 'ready',
-        // Clear all area-specific state on new search
+        // Atomic context reset on every new search (§0.4):
+        selectedFeature: null,
         incident: null,
         hazard: null,
-        selectedFeature: null,
-        selectedOrigin: null,
-        selectedDestination: null,
-        selectedRoute: null,
-        selectedSite: null,
-        currentPlan: null,
         historicalEvent: null,
         historicalTimestamp: null,
         historicalTimeline: [],
+        selectedOrigin: null,
+        selectedDestination: null,
+        selectedRoute: null,
+        routeStatus: 'idle',
+        selectedSite: null,
+        currentPlan: null,
+        planStatus: 'draft',
+        decisionState: null,
         scenarioBaseline: null,
         scenarioProjection: null,
-        mapViewport: {
-          lat: action.payload.lat,
-          lon: action.payload.lon,
-          zoom: action.payload.zoom ?? 11,
-        },
+        scenarioParams: {},
+        mapViewport: canonicalArea ? {
+          lat: canonicalArea.lat,
+          lon: canonicalArea.lon,
+          zoom: canonicalArea.zoom,
+        } : state.mapViewport,
       }
+    }
 
     case 'SET_AREA_STATUS':
       return { ...state, areaStatus: action.payload }

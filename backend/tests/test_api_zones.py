@@ -52,11 +52,15 @@ app.include_router(zones_router, prefix="/api")
 def _make_habitation(id=1, name="Test Hab", population=500,
                      district="Chamoli"):
     h = MagicMock()
-    h.id         = id
-    h.name       = name
-    h.population = population
-    h.district   = district
-    h.state      = "Uttarakhand"
+    h.id                    = id
+    h.name                  = name
+    h.population            = population
+    h.district              = district
+    h.state                 = "Uttarakhand"
+    h.region_id             = 1
+    h.slope_degrees         = 8.0
+    h.distance_to_hazard_km = 0.5
+    h.terrain_data_source   = "REAL"
     return h
 
 
@@ -69,12 +73,16 @@ def _make_zone_score(habitation_id=1, hazard=0.845, urgency=0.760,
     zs.urgency_score   = urgency
     zs.capacity_score  = cap
     zs.classification  = MagicMock(value=classification)
+    zs.relocation_horizon = MagicMock(value="IMMEDIATE")
+    zs.relocation_horizon_rationale = "High hazard test rationale"
     zs.matched_site_id = site_id
-    zs.computed_at     = datetime(2026, 1, 1, 12, 0, 0)   # not stale for tests
+    zs.computed_at     = datetime.utcnow()   # fresh for tests
     zs.live_rainfall_mm  = 45.0
     zs.live_seismic_mag  = None
     zs.live_trigger_mult = 1.15
     zs.data_is_cached    = False
+    zs.current_conditions = "LIVE"
+    zs.permanent_habitation_status = "CONDITIONAL"
     zs.explanation_json  = {
         "habitation": "Test Hab",
         "population": 500,
@@ -120,6 +128,10 @@ def _make_site(id=1, name="Test Site"):
     s.distance_to_water_km = 0.8
     s.existing_occupancy   = 420
     s.max_capacity_estimate = 2000
+    s.committed_population = 0
+    s.region_id            = 1
+    s.hazard_free          = True
+    s.overlapping_hazard_zone_id = None
     return s
 
 
@@ -147,6 +159,13 @@ def _make_mock_db(
         elif "CandidateSite" in str(model):
             q.all.return_value = _sites
             q.filter.return_value = q
+        elif "Region" in str(model):
+            reg = MagicMock()
+            reg.id = 1
+            reg.name = "Assam Brahmaputra-Barak Pilot"
+            reg.bounding_radius_km = 250.0
+            q.all.return_value = [reg]
+            q.filter.return_value = q
         else:
             q.all.return_value = []
             q.filter.return_value = q
@@ -164,8 +183,15 @@ def _make_mock_db(
         if "CandidateSite" in name:
             matching = [s for s in _sites if s.id == pk]
             return matching[0] if matching else None
+        if "Region" in name:
+            reg = MagicMock()
+            reg.id = pk or 1
+            reg.name = "Assam Brahmaputra-Barak Pilot"
+            reg.bounding_radius_km = 250.0
+            return reg
         return None
     db.get = _get
+
 
     # Raw SQL execute — returns lat/lon stubs
     exec_result = MagicMock()

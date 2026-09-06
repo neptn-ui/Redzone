@@ -3,7 +3,11 @@
 #
 # Provides geographic context for a searched location.
 # This allows the frontend to determine what data is available
-# for a given area without assuming Assam/Majuli defaults.
+# for a given area without assuming any specific region defaults.
+#
+# §0.5: area_context() returns which region_id/region_name a queried lat/lon
+# falls under, sourced from the regions table's center+radius — no hardcoded
+# coordinates or region-specific logic.
 # ============================================================================
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from models import Habitation, CandidateSite, get_db
+from models import Habitation, CandidateSite, Region, get_db
 from scoring.prioritization_engine import haversine_km
 
 log = logging.getLogger(__name__)
@@ -24,38 +28,69 @@ router = APIRouter(tags=["areas"])
 
 
 class AreaContextResponse(BaseModel):
-    lat: float
-    lon: float
-    radius_km: float
+    display_name:        Optional[str] = None
+    lat:                 float
+    lon:                 float
+    lng:                 float
+    radius_km:           float
+    country:             Optional[str] = None
+    state:               Optional[str] = None
+    district:            Optional[str] = None
+    resolution_source:   str = "Coordinates"
     # Counts of data available in this area
-    habitation_count: int
-    site_count: int
-    has_zone_data: bool
-    has_site_data: bool
+    habitation_count:    int
+    site_count:          int
+    has_zone_data:       bool
+    has_site_data:       bool
+    # Tier 0.1 / 0.3 — which region(s) this lat/lon genuinely falls under (nullable, zero fallback)
+    matched_region_id:   Optional[int]  = None
+    matched_region_name: Optional[str]  = None
+    is_seeded:           bool = False
     # Data coverage note
-    coverage_note: str
+    coverage_note:       str
     # Pilot data note — are we returning real or pilot data?
-    data_status: str   # 'REAL' | 'PILOT_ONLY' | 'NONE'
+    data_status:         str   # 'REAL' | 'PILOT_ONLY' | 'NONE'
 
 
 @router.get(
     "/areas/context",
     response_model=AreaContextResponse,
-    summary="Get data availability context for a geographic area",
+    summary="Get data availability context for a geographic area (§0.1, §0.3)",
 )
 def area_context(
-    lat:       float = Query(..., description="Center latitude"),
-    lon:       float = Query(..., description="Center longitude"),
-    radius_km: float = Query(100.0, description="Search radius in km"),
+    lat:          float = Query(..., description="Center latitude"),
+    lon:          float = Query(..., description="Center longitude"),
+    radius_km:    float = Query(100.0, description="Search radius in km"),
+    display_name: Optional[str] = Query(None),
+    country:      Optional[str] = Query(None),
+    state:        Optional[str] = Query(None),
+    district:     Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """
-    Returns what REDZONE data is available for a geographic area.
-    Used by the frontend to decide whether to show real data or
-    indicate that only pilot/demo data is available.
-
-    This endpoint is honest: it never fabricates coverage.
+    Tier 0.1, 0.3: Canonical AreaContext resolution.
+    A Region must NEVER determine where the user actually is.
+    If no seeded Region exists for the geocoded location:
+      matched_region_id = None, matched_region_name = None, is_seeded = False.
+    Strictly prohibits:
+      - no match -> nearest Region
+      - no match -> previous Region
+      - Nepal -> closest known region -> Chamoli
     """
+    matched_region_id: Optional[int] = None
+    matched_region_name: Optional[str] = None
+    active_regions = (
+        db.query(Region)
+        .filter(Region.data_status.in_(["ACTIVE", "PILOT"]))
+        .all()
+    )
+    for r in active_regions:
+        dist = haversine_km(lat, lon, r.center_lat, r.center_lon)
+        if dist <= r.bounding_radius_km:
+            matched_region_id   = r.id
+            matched_region_name = r.name
+            break  # genuine spatial containment only
+
     # Count habitations within radius
     all_habs = db.query(Habitation).all()
     hab_count = 0
@@ -103,13 +138,22 @@ def area_context(
         )
 
     return AreaContextResponse(
+        display_name=display_name or f"{lat:.4f}, {lon:.4f}",
         lat=lat,
         lon=lon,
+        lng=lon,
         radius_km=radius_km,
+        country=country,
+        state=state,
+        district=district,
+        resolution_source="Nominatim / OpenStreetMap" if display_name else "Coordinates",
         habitation_count=hab_count,
         site_count=site_count,
         has_zone_data=hab_count > 0,
         has_site_data=site_count > 0,
+        matched_region_id=matched_region_id,
+        matched_region_name=matched_region_name,
+        is_seeded=matched_region_id is not None,
         coverage_note=coverage_note,
         data_status=data_status,
     )
